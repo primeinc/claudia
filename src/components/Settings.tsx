@@ -277,9 +277,12 @@ export const Settings: React.FC<SettingsProps> = ({
   /**
    * Handle Claude installation selection
    */
-  const handleClaudeInstallationSelect = (installation: ClaudeInstallation) => {
+  const handleClaudeInstallationSelect = (installation: ClaudeInstallation, isUserAction = true) => {
     setSelectedInstallation(installation);
-    setBinaryPathChanged(installation.path !== currentBinaryPath);
+    // Only show "changed" warning for actual user actions, not automatic selections
+    if (isUserAction) {
+      setBinaryPathChanged(installation.path !== currentBinaryPath);
+    }
   };
 
   return (
