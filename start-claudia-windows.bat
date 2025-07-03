@@ -33,7 +33,7 @@ IF NOT EXIST "%CLAUDIA_BIN_PATH%\claude.bat" (
         echo REM This is a bridge script for Claudia on Windows.
         echo REM It calls the 'claude' CLI within WSL and handles argument filtering.
         echo:
-        echo SETLOCAL
+        echo SETLOCAL EnableDelayedExpansion
         echo:
         echo REM --- Configuration ---
         echo REM Enter the name of your WSL distribution here ^(e.g., "Ubuntu"^).
@@ -45,10 +45,12 @@ IF NOT EXIST "%CLAUDIA_BIN_PATH%\claude.bat" (
         echo REM ** IMPORTANT: Version check for the patched Claudia GUI **
         echo REM Gets the real version from WSL and appends ^(WSL Bridge^) suffix
         echo if /I "%%1" == "--version" ^(
-        echo     for /f "tokens=*" %%%%i in ^('wsl -- bash -lc "claude --version" 2^^^>^^^&1'^) do ^(
-        echo         echo %%%%i ^(WSL Bridge^^^)
-        echo         exit /b 0
+        echo     for /f "tokens=* delims=" %%%%i in ^('wsl -- bash -lc "claude --version 2^>^&1" ^^^| tr -d "\\r"'^) do ^(
+        echo         set "output=%%%%i"
+        echo         REM Ensure proper Windows line ending by removing WSL line endings
+        echo         echo !output! ^(WSL Bridge^^^)
         echo     ^)
+        echo     exit /b 0
         echo ^)
         echo:
         echo REM Build filtered arguments
@@ -102,6 +104,7 @@ SET CARGO_INCREMENTAL=0
 REM Set proper terminal settings for Windows
 SET CARGO_TERM_COLOR=always
 SET RUST_BACKTRACE=1
+SET RUST_LOG=claudia=info
 
 REM Kill any process using port 5173
 echo [INFO] Clearing port 5173...

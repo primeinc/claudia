@@ -314,13 +314,20 @@ fn parse_jsonl_file(
     let mut actual_project_path: Option<String> = None;
 
     if let Ok(content) = read_claude_file(relative_path) {
+        // Only log a sample of files to avoid spamming logs
+        static FILE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let count = FILE_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if count < 5 || count % 100 == 0 {
+            log::info!("[USAGE] Parsing file #{}: {}", count + 1, relative_path);
+        }
         // Extract session ID from the file path
-        let path_parts: Vec<&str> = relative_path.split('/').collect();
-        let session_id = if path_parts.len() >= 2 {
-            path_parts[path_parts.len() - 2].to_string()
-        } else {
-            "unknown".to_string()
-        };
+        // Path format: projects/project-name/session-id.jsonl
+        let session_id = relative_path
+            .split('/')
+            .last()
+            .and_then(|filename| filename.strip_suffix(".jsonl"))
+            .unwrap_or("unknown")
+            .to_string();
 
         for line in content.lines() {
             if line.trim().is_empty() {
@@ -336,8 +343,9 @@ fn parse_jsonl_file(
                 }
 
                 // Try to parse as JsonlEntry for usage data
-                if let Ok(entry) = serde_json::from_value::<JsonlEntry>(json_value) {
-                    if let Some(message) = &entry.message {
+                match serde_json::from_value::<JsonlEntry>(json_value.clone()) {
+                    Ok(entry) => {
+                        if let Some(message) = &entry.message {
                         // Deduplication based on message ID and request ID
                         if let (Some(msg_id), Some(req_id)) = (&message.id, &entry.request_id) {
                             let unique_hash = format!("{}:{}", msg_id, req_id);
@@ -355,6 +363,20 @@ fn parse_jsonl_file(
                                 && usage.cache_read_input_tokens.unwrap_or(0) == 0
                             {
                                 continue;
+                            }
+                            
+                            // Log first few entries at info level for debugging
+                            static USAGE_LOG_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                            let log_count = USAGE_LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if log_count < 5 {
+                                log::info!("[USAGE] Found usage entry #{} in {}: model={:?}, input={:?}, output={:?}, cache_creation={:?}, cache_read={:?}", 
+                                    log_count + 1,
+                                    relative_path, 
+                                    message.model, 
+                                    usage.input_tokens, 
+                                    usage.output_tokens,
+                                    usage.cache_creation_input_tokens,
+                                    usage.cache_read_input_tokens);
                             }
 
                             let cost = entry.cost_usd.unwrap_or_else(|| {
@@ -388,9 +410,23 @@ fn parse_jsonl_file(
                             });
                         }
                     }
+                    },
+                    Err(e) => {
+                        // Log parsing errors for first few attempts
+                        static PARSE_ERROR_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                        let error_count = PARSE_ERROR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if error_count < 5 {
+                            log::warn!("[USAGE] Failed to parse JSONL entry #{} in {}: {}", error_count + 1, relative_path, e);
+                            log::debug!("[USAGE] Failed JSON: {:?}", json_value);
+                        }
+                    }
                 }
             }
         }
+    }
+    
+    if !entries.is_empty() {
+        log::info!("[USAGE] Parsed {} usage entries from {}", entries.len(), relative_path);
     }
 
     entries
@@ -445,12 +481,10 @@ fn get_all_usage_entries_with_filter(
         
         // Try loading from disk cache if memory cache is stale/empty
         if cache.is_stale() || cache.entries.is_empty() {
-            println!("[CACHE] Attempting to load usage cache from disk...");
             match cache.load_from_disk() {
-                Ok(true) => println!("[CACHE] Successfully loaded usage cache from disk"),
-                Ok(false) => println!("[CACHE] Disk cache not loaded (invalid or missing)"),
+                Ok(true) => log::info!("[CACHE] Successfully loaded usage cache from disk"),
+                Ok(false) => log::debug!("[CACHE] Disk cache not loaded (invalid or missing)"),
                 Err(e) => {
-                    println!("[CACHE] Failed to load usage cache from disk: {}", e);
                     log::warn!("Failed to load usage cache from disk: {}", e);
                 }
             }
@@ -489,10 +523,10 @@ fn get_all_usage_entries_with_filter(
     let mut files_to_process: Vec<(String, String)> = Vec::new();
 
     // Use optimized find command to get all .jsonl files at once
-    log::debug!("Finding all .jsonl files in projects directory...");
+    log::info!("[USAGE] Finding all .jsonl files in projects directory...");
     match find_claude_files("projects", "*.jsonl") {
         Ok(jsonl_files) => {
-            log::debug!("Found {} .jsonl files using find command", jsonl_files.len());
+            log::info!("[USAGE] Found {} .jsonl files using find command", jsonl_files.len());
             
             // Extract project name from each file path
             for file_path in jsonl_files {
@@ -522,7 +556,7 @@ fn get_all_usage_entries_with_filter(
 
     // Process files in parallel for better performance
     let file_chunks: Vec<_> = files_to_process.chunks(50).collect();
-    log::debug!("Processing {} files in {} chunks...", files_to_process.len(), file_chunks.len());
+    log::info!("[USAGE] Processing {} files in {} chunks...", files_to_process.len(), file_chunks.len());
     
     let chunk_results: Vec<Vec<UsageEntry>> = file_chunks.par_iter()
         .map(|chunk| {
@@ -563,17 +597,18 @@ fn get_all_usage_entries_with_filter(
         
         let mut cache = USAGE_CACHE.lock().unwrap();
         cache.update(all_entries.clone(), file_timestamps);
-        log::info!("Updated usage cache with {} entries (will be valid for 5 minutes)", all_entries.len());
+        log::info!("[CACHE] Updated usage cache with {} entries (will be valid for 30 minutes)", all_entries.len());
         
         // Save to disk cache
-        println!("[CACHE] Saving usage cache to disk...");
+        log::info!("[CACHE] Saving usage cache to disk...");
         if let Err(e) = cache.save_to_disk() {
-            println!("[CACHE] Failed to save usage cache to disk: {}", e);
-            log::warn!("Failed to save usage cache to disk: {}", e);
+            log::warn!("[CACHE] Failed to save usage cache to disk: {}", e);
         } else {
-            println!("[CACHE] Usage cache saved successfully");
+            log::info!("[CACHE] Usage cache saved successfully");
         }
     }
+    
+    log::info!("[USAGE] Total usage entries found: {}", all_entries.len());
 
     all_entries
 }

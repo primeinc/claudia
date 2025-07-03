@@ -44,8 +44,46 @@ use std::sync::Mutex;
 use tauri::Manager;
 
 fn main() {
-    // Initialize logger
-    env_logger::init();
+    // Initialize logger with proper formatting and thread safety for Windows
+    #[cfg(target_os = "windows")]
+    {
+        use std::io::Write;
+        
+        // Use a mutex to ensure thread-safe console output
+        static CONSOLE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        
+        env_logger::Builder::from_default_env()
+            .format(move |buf, record| {
+                let _lock = CONSOLE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+                writeln!(
+                    buf,
+                    "[{}] {} {} {}",
+                    chrono::Local::now().format("%Y-%m-%dT%H:%M:%SZ"),
+                    record.level(),
+                    record.target(),
+                    record.args()
+                )
+            })
+            .write_style(env_logger::WriteStyle::Never)
+            .init();
+    }
+    
+    #[cfg(not(target_os = "windows"))]
+    {
+        env_logger::Builder::from_default_env()
+            .format(|buf, record| {
+                use std::io::Write;
+                writeln!(
+                    buf,
+                    "[{}] {} {} {}",
+                    chrono::Local::now().format("%Y-%m-%dT%H:%M:%SZ"),
+                    record.level(),
+                    record.target(),
+                    record.args()
+                )
+            })
+            .init();
+    }
 
 
     tauri::Builder::default()

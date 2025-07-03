@@ -410,6 +410,13 @@ pub async fn open_new_session(app: AppHandle, path: Option<String>) -> Result<St
             cmd.current_dir(&project_path);
         }
 
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+
         // Execute the command
         match cmd.spawn() {
             Ok(_) => {
@@ -476,6 +483,17 @@ pub async fn check_claude_version(app: AppHandle) -> Result<ClaudeVersionStatus,
 
     #[cfg(debug_assertions)]
     {
+        #[cfg(target_os = "windows")]
+        let output = {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            std::process::Command::new(claude_path)
+                .arg("--version")
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+        };
+        
+        #[cfg(not(target_os = "windows"))]
         let output = std::process::Command::new(claude_path)
             .arg("--version")
             .output();
@@ -859,9 +877,17 @@ pub async fn cancel_claude_execution(
                     if let Some(pid) = pid {
                         log::info!("Attempting system kill as last resort for PID: {}", pid);
                         let kill_result = if cfg!(target_os = "windows") {
-                            std::process::Command::new("taskkill")
-                                .args(["/F", "/PID", &pid.to_string()])
-                                .output()
+                            #[cfg(target_os = "windows")]
+                            {
+                                use std::os::windows::process::CommandExt;
+                                const CREATE_NO_WINDOW: u32 = 0x08000000;
+                                std::process::Command::new("taskkill")
+                                    .args(["/F", "/PID", &pid.to_string()])
+                                    .creation_flags(CREATE_NO_WINDOW)
+                                    .output()
+                            }
+                            #[cfg(not(target_os = "windows"))]
+                            unreachable!()
                         } else {
                             std::process::Command::new("kill")
                                 .args(["-KILL", &pid.to_string()])

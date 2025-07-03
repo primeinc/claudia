@@ -196,12 +196,12 @@ pub async fn get_cached_projects(force_refresh: bool) -> Result<Vec<CachedProjec
         
         // Try loading from disk cache if memory cache is stale/empty
         if cache.is_stale() || cache.projects.is_empty() {
-            println!("[CACHE] Attempting to load projects cache from disk...");
+            log::info!("[CACHE] Attempting to load projects cache from disk...");
             match cache.load_from_disk() {
-                Ok(true) => println!("[CACHE] Successfully loaded projects cache from disk"),
-                Ok(false) => println!("[CACHE] Disk cache not loaded (invalid or missing)"),
+                Ok(true) => log::info!("[CACHE] Successfully loaded projects cache from disk"),
+                Ok(false) => log::info!("[CACHE] Disk cache not loaded (invalid or missing)"),
                 Err(e) => {
-                    println!("[CACHE] Failed to load projects cache from disk: {}", e);
+                    log::warn!("[CACHE] Failed to load projects cache from disk: {}", e);
                     log::warn!("Failed to load projects cache from disk: {}", e);
                 }
             }
@@ -254,12 +254,12 @@ pub async fn get_cached_projects(force_refresh: bool) -> Result<Vec<CachedProjec
         cache.update(projects.clone(), project_sessions, file_metadata);
         
         // Save to disk cache
-        println!("[CACHE] Saving projects cache to disk...");
+        log::info!("[CACHE] Saving projects cache to disk...");
         if let Err(e) = cache.save_to_disk() {
-            println!("[CACHE] Failed to save projects cache to disk: {}", e);
+            log::warn!("[CACHE] Failed to save projects cache to disk: {}", e);
             log::warn!("Failed to save projects cache to disk: {}", e);
         } else {
-            println!("[CACHE] Projects cache saved successfully");
+            log::info!("[CACHE] Projects cache saved successfully");
         }
     }
 
