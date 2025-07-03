@@ -95,6 +95,9 @@ SET "PATH=%USERPROFILE%\.bun\bin;%CLAUDIA_BIN_PATH%;%PATH%"
 REM Disable Rust incremental compilation for Windows
 SET CARGO_INCREMENTAL=0
 
+REM Disable cargo progress bar to fix terminal output
+SET CARGO_TERM_PROGRESS_WHEN=never
+
 REM Kill any process using port 5173
 echo [INFO] Clearing port 5173...
 for /f "tokens=5" %%a in ('netstat -aon ^| findstr :5173 2^>nul') do (
@@ -113,6 +116,7 @@ echo Press Ctrl+C to exit.
 echo.
 
 REM Run Tauri dev
+REM Note: Running directly to avoid line ending issues with cargo output
 bun run tauri dev
 
 pause
