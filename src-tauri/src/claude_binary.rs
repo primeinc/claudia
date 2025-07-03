@@ -110,7 +110,7 @@ fn source_preference(installation: &ClaudeInstallation) -> u8 {
         source if source.starts_with("nvm") => 4,
         "local-bin" => 5,
         "claude-local" => 6,
-        "claudia-bin" => 1,
+        "wsl-bridge" => 1,
         "npm-global" => 7,
         "yarn" | "yarn-global" => 8,
         "bun" => 9,
@@ -302,7 +302,7 @@ fn find_standard_installations() -> Vec<ClaudeInstallation> {
         if let Ok(userprofile) = std::env::var("USERPROFILE") {
             paths_to_check.push((
                 format!("{}\\.claudia\\bin\\claude.bat", userprofile),
-                "claudia-bin".to_string(),
+                "wsl-bridge".to_string(),
             ));
         }
     }
