@@ -1,5 +1,9 @@
 @echo off
-SETLOCAL
+SETLOCAL EnableDelayedExpansion
+
+REM Enable ANSI color codes in Windows Terminal
+for /f "tokens=3" %%a in ('reg query HKCU\Console /v VirtualTerminalLevel 2^>nul ^| findstr /i VirtualTerminalLevel') do set /a VTL=%%a
+if !VTL! LSS 1 reg add HKCU\Console /v VirtualTerminalLevel /t REG_DWORD /d 1 /f >nul 2>&1
 
 echo =================================================================
 echo ==                                                             ==
@@ -95,8 +99,9 @@ SET "PATH=%USERPROFILE%\.bun\bin;%CLAUDIA_BIN_PATH%;%PATH%"
 REM Disable Rust incremental compilation for Windows
 SET CARGO_INCREMENTAL=0
 
-REM Disable cargo progress bar to fix terminal output
-SET CARGO_TERM_PROGRESS_WHEN=never
+REM Set proper terminal settings for Windows
+SET CARGO_TERM_COLOR=always
+SET RUST_BACKTRACE=1
 
 REM Kill any process using port 5173
 echo [INFO] Clearing port 5173...
