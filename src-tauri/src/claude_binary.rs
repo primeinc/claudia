@@ -110,6 +110,7 @@ fn source_preference(installation: &ClaudeInstallation) -> u8 {
         source if source.starts_with("nvm") => 4,
         "local-bin" => 5,
         "claude-local" => 6,
+        "claudia-bin" => 1,
         "npm-global" => 7,
         "yarn" | "yarn-global" => 8,
         "bun" => 9,
@@ -298,10 +299,10 @@ fn find_standard_installations() -> Vec<ClaudeInstallation> {
     // Check Windows-specific paths
     #[cfg(target_os = "windows")]
     {
-        if let Ok(appdata) = std::env::var("APPDATA") {
+        if let Ok(userprofile) = std::env::var("USERPROFILE") {
             paths_to_check.push((
-                format!("{}\\npm\\claude.bat", appdata),
-                "windows-npm".to_string(),
+                format!("{}\\.claudia\\bin\\claude.bat", userprofile),
+                "claudia-bin".to_string(),
             ));
         }
     }
