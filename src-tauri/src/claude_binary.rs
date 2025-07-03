@@ -144,44 +144,99 @@ fn discover_all_installations() -> Vec<ClaudeInstallation> {
 
 /// Try using the 'which' command to find Claude
 fn try_which_command() -> Option<ClaudeInstallation> {
-    debug!("Trying 'which claude' to find binary...");
-
-    match Command::new("which").arg("claude").output() {
-        Ok(output) if output.status.success() => {
-            let output_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-            if output_str.is_empty() {
-                return None;
+    #[cfg(target_os = "windows")]
+    {
+        debug!("Trying 'where claude' to find binary on Windows...");
+        
+        // On Windows, use 'where' instead of 'which'
+        match Command::new("where").arg("claude").output() {
+            Ok(output) if output.status.success() => {
+                let output_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !output_str.is_empty() {
+                    // 'where' might return multiple paths, take the first one
+                    if let Some(path) = output_str.lines().next() {
+                        debug!("'where' found claude at: {}", path);
+                        
+                        // Get version
+                        let version = get_claude_version(path).ok().flatten();
+                        
+                        return Some(ClaudeInstallation {
+                            path: path.to_string(),
+                            version,
+                            source: "where".to_string(),
+                        });
+                    }
+                }
             }
-
-            // Parse aliased output: "claude: aliased to /path/to/claude"
-            let path = if output_str.starts_with("claude:") && output_str.contains("aliased to") {
-                output_str
-                    .split("aliased to")
-                    .nth(1)
-                    .map(|s| s.trim().to_string())
-            } else {
-                Some(output_str)
-            }?;
-
-            debug!("'which' found claude at: {}", path);
-
-            // Verify the path exists
-            if !PathBuf::from(&path).exists() {
-                warn!("Path from 'which' does not exist: {}", path);
-                return None;
-            }
-
-            // Get version
-            let version = get_claude_version(&path).ok().flatten();
-
-            Some(ClaudeInstallation {
-                path,
-                version,
-                source: "which".to_string(),
-            })
+            _ => {}
         }
-        _ => None,
+        
+        // Also try claude.bat specifically
+        match Command::new("where").arg("claude.bat").output() {
+            Ok(output) if output.status.success() => {
+                let output_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !output_str.is_empty() {
+                    if let Some(path) = output_str.lines().next() {
+                        debug!("'where' found claude.bat at: {}", path);
+                        
+                        // Get version
+                        let version = get_claude_version(path).ok().flatten();
+                        
+                        return Some(ClaudeInstallation {
+                            path: path.to_string(),
+                            version,
+                            source: "where".to_string(),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+        
+        None
+    }
+    
+    #[cfg(not(target_os = "windows"))]
+    {
+        debug!("Trying 'which claude' to find binary...");
+
+        match Command::new("which").arg("claude").output() {
+            Ok(output) if output.status.success() => {
+                let output_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+                if output_str.is_empty() {
+                    return None;
+                }
+
+                // Parse aliased output: "claude: aliased to /path/to/claude"
+                let path = if output_str.starts_with("claude:") && output_str.contains("aliased to") {
+                    output_str
+                        .split("aliased to")
+                        .nth(1)
+                        .map(|s| s.trim().to_string())
+                } else {
+                    Some(output_str)
+                }?;
+
+                debug!("'which' found claude at: {}", path);
+
+                // Verify the path exists
+                if !PathBuf::from(&path).exists() {
+                    warn!("Path from 'which' does not exist: {}", path);
+                    return None;
+                }
+
+                // Get version
+                let version = get_claude_version(&path).ok().flatten();
+
+                Some(ClaudeInstallation {
+                    path,
+                    version,
+                    source: "which".to_string(),
+                })
+            }
+            _ => None,
+        }
     }
 }
 
@@ -240,6 +295,17 @@ fn find_standard_installations() -> Vec<ClaudeInstallation> {
         ("/bin/claude".to_string(), "system".to_string()),
     ];
 
+    // Check Windows-specific paths
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            paths_to_check.push((
+                format!("{}\\npm\\claude.bat", appdata),
+                "windows-npm".to_string(),
+            ));
+        }
+    }
+    
     // Also check user-specific paths
     if let Ok(home) = std::env::var("HOME") {
         paths_to_check.extend(vec![
@@ -288,16 +354,39 @@ fn find_standard_installations() -> Vec<ClaudeInstallation> {
     }
 
     // Also check if claude is available in PATH (without full path)
-    if let Ok(output) = Command::new("claude").arg("--version").output() {
-        if output.status.success() {
-            debug!("claude is available in PATH");
-            let version = extract_version_from_output(&output.stdout);
+    #[cfg(target_os = "windows")]
+    {
+        // On Windows, try both claude and claude.bat
+        for cmd in &["claude", "claude.bat"] {
+            if let Ok(output) = Command::new(cmd).arg("--version").output() {
+                if output.status.success() {
+                    debug!("{} is available in PATH", cmd);
+                    let version = extract_version_from_output(&output.stdout);
 
-            installations.push(ClaudeInstallation {
-                path: "claude".to_string(),
-                version,
-                source: "PATH".to_string(),
-            });
+                    installations.push(ClaudeInstallation {
+                        path: cmd.to_string(),
+                        version,
+                        source: "PATH".to_string(),
+                    });
+                    break; // Only need one
+                }
+            }
+        }
+    }
+    
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Ok(output) = Command::new("claude").arg("--version").output() {
+            if output.status.success() {
+                debug!("claude is available in PATH");
+                let version = extract_version_from_output(&output.stdout);
+
+                installations.push(ClaudeInstallation {
+                    path: "claude".to_string(),
+                    version,
+                    source: "PATH".to_string(),
+                });
+            }
         }
     }
 

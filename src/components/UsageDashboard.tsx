@@ -14,7 +14,8 @@ import {
   DollarSign,
   Activity,
   FileText,
-  Briefcase
+  Briefcase,
+  RefreshCw
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -36,23 +37,33 @@ export const UsageDashboard: React.FC<UsageDashboardProps> = ({ onBack }) => {
   const [error, setError] = useState<string | null>(null);
   const [stats, setStats] = useState<UsageStats | null>(null);
   const [sessionStats, setSessionStats] = useState<ProjectUsage[] | null>(null);
-  const [selectedDateRange, setSelectedDateRange] = useState<"all" | "7d" | "30d">("all");
+  const [selectedDateRange, setSelectedDateRange] = useState<"all" | "7d" | "30d">("7d");
   const [activeTab, setActiveTab] = useState("overview");
+  const [loadingMessage, setLoadingMessage] = useState<string>("Initializing...");
 
   useEffect(() => {
     loadUsageStats();
   }, [selectedDateRange]);
 
-  const loadUsageStats = async () => {
+  const loadUsageStats = async (forceRefresh = false) => {
     try {
       setLoading(true);
       setError(null);
+      
+      if (forceRefresh) {
+        setLoadingMessage("Clearing cache and refreshing data...");
+        await api.clearUsageCache();
+      }
+      
+      setLoadingMessage("Loading usage data...");
 
       let statsData: UsageStats;
       let sessionData: ProjectUsage[];
       
       if (selectedDateRange === "all") {
+        setLoadingMessage("Loading all usage data (this may take a moment)...");
         statsData = await api.getUsageStats();
+        setLoadingMessage("Loading session statistics...");
         sessionData = await api.getSessionStats();
       } else {
         const endDate = new Date();
@@ -67,10 +78,12 @@ export const UsageDashboard: React.FC<UsageDashboardProps> = ({ onBack }) => {
             return `${year}${month}${day}`;
         }
 
+        setLoadingMessage(`Loading ${days} days of usage data...`);
         statsData = await api.getUsageByDateRange(
           startDate.toISOString(),
           endDate.toISOString()
         );
+        setLoadingMessage("Loading session statistics...");
         sessionData = await api.getSessionStats(
             formatDateForApi(startDate),
             formatDateForApi(endDate),
@@ -153,21 +166,34 @@ export const UsageDashboard: React.FC<UsageDashboardProps> = ({ onBack }) => {
             </div>
           </div>
           
-          {/* Date Range Filter */}
-          <div className="flex items-center space-x-2">
-            <Filter className="h-4 w-4 text-muted-foreground" />
-            <div className="flex space-x-1">
-              {(["all", "30d", "7d"] as const).map((range) => (
-                <Button
-                  key={range}
-                  variant={selectedDateRange === range ? "default" : "ghost"}
-                  size="sm"
-                  onClick={() => setSelectedDateRange(range)}
-                  className="text-xs"
-                >
-                  {range === "all" ? "All Time" : range === "7d" ? "Last 7 Days" : "Last 30 Days"}
-                </Button>
-              ))}
+          {/* Date Range Filter and Refresh */}
+          <div className="flex items-center space-x-4">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => loadUsageStats(true)}
+              disabled={loading}
+              className="text-xs"
+            >
+              <RefreshCw className={cn("h-4 w-4 mr-1", loading && "animate-spin")} />
+              Refresh
+            </Button>
+            
+            <div className="flex items-center space-x-2">
+              <Filter className="h-4 w-4 text-muted-foreground" />
+              <div className="flex space-x-1">
+                {(["7d", "30d", "all"] as const).map((range) => (
+                  <Button
+                    key={range}
+                    variant={selectedDateRange === range ? "default" : "ghost"}
+                    size="sm"
+                    onClick={() => setSelectedDateRange(range)}
+                    className="text-xs"
+                  >
+                    {range === "all" ? "All Time" : range === "7d" ? "Last 7 Days" : "Last 30 Days"}
+                  </Button>
+                ))}
+              </div>
             </div>
           </div>
         </div>
@@ -179,7 +205,10 @@ export const UsageDashboard: React.FC<UsageDashboardProps> = ({ onBack }) => {
           <div className="flex items-center justify-center h-full">
             <div className="text-center">
               <Loader2 className="h-8 w-8 animate-spin text-muted-foreground mx-auto mb-4" />
-              <p className="text-sm text-muted-foreground">Loading usage statistics...</p>
+              <p className="text-sm text-muted-foreground">{loadingMessage}</p>
+              <p className="text-xs text-muted-foreground mt-2">
+                {selectedDateRange === "all" ? "Processing all historical data..." : "This should only take a moment..."}
+              </p>
             </div>
           </div>
         ) : error ? (

@@ -1,3 +1,4 @@
+use crate::claude_paths::{read_claude_file, claude_file_exists};
 use anyhow::Result;
 use chrono;
 use log::{debug, error, info, warn};
@@ -163,24 +164,19 @@ impl AgentRunMetrics {
 
 /// Read JSONL content from a session file
 pub async fn read_session_jsonl(session_id: &str, project_path: &str) -> Result<String, String> {
-    let claude_dir = dirs::home_dir()
-        .ok_or("Failed to get home directory")?
-        .join(".claude")
-        .join("projects");
-
     // Encode project path to match Claude Code's directory naming
     let encoded_project = project_path.replace('/', "-");
-    let project_dir = claude_dir.join(&encoded_project);
-    let session_file = project_dir.join(format!("{}.jsonl", session_id));
+    let relative_path = format!("projects/{}/{}.jsonl", encoded_project, session_id);
 
-    if !session_file.exists() {
+    if !claude_file_exists(&relative_path) {
         return Err(format!(
             "Session file not found: {}",
-            session_file.display()
+            relative_path
         ));
     }
 
-    match tokio::fs::read_to_string(&session_file).await {
+    // Note: claude_paths functions are synchronous, so we use them directly
+    match read_claude_file(&relative_path) {
         Ok(content) => Ok(content),
         Err(e) => Err(format!("Failed to read session file: {}", e)),
     }
@@ -1254,30 +1250,23 @@ pub async fn stream_session_output(
 
     // Spawn a task to monitor the file
     tokio::spawn(async move {
-        let claude_dir = match dirs::home_dir() {
-            Some(home) => home.join(".claude").join("projects"),
-            None => return,
-        };
-
         let encoded_project = project_path.replace('/', "-");
-        let project_dir = claude_dir.join(&encoded_project);
-        let session_file = project_dir.join(format!("{}.jsonl", session_id));
+        let relative_path = format!("projects/{}/{}.jsonl", encoded_project, session_id);
 
-        let mut last_size = 0u64;
+        let mut last_content_len = 0usize;
 
         // Monitor file changes continuously while session is running
         loop {
-            if session_file.exists() {
-                if let Ok(metadata) = tokio::fs::metadata(&session_file).await {
-                    let current_size = metadata.len();
-
-                    if current_size > last_size {
-                        // File has grown, read new content
-                        if let Ok(content) = tokio::fs::read_to_string(&session_file).await {
-                            let _ = app
-                                .emit("session-output-update", &format!("{}:{}", run_id, content));
-                        }
-                        last_size = current_size;
+            if claude_file_exists(&relative_path) {
+                // Read the file content
+                if let Ok(content) = read_claude_file(&relative_path) {
+                    let current_len = content.len();
+                    
+                    if current_len > last_content_len {
+                        // File has grown, emit new content
+                        let _ = app
+                            .emit("session-output-update", &format!("{}:{}", run_id, content));
+                        last_content_len = current_len;
                     }
                 }
             } else {

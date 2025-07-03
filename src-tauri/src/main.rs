@@ -3,6 +3,7 @@
 
 mod checkpoint;
 mod claude_binary;
+mod claude_paths;
 mod commands;
 mod process;
 
@@ -26,7 +27,7 @@ use commands::claude::{
     open_new_session, read_claude_md_file, restore_checkpoint, resume_claude_code,
     save_claude_md_file, save_claude_settings, save_system_prompt, search_files,
     track_checkpoint_message, track_session_messages, update_checkpoint_settings,
-    ClaudeProcessState,
+    ClaudeProcessState, refresh_projects_cache, get_projects_cache_stats, clear_projects_cache,
 };
 use commands::mcp::{
     mcp_add, mcp_add_from_claude_desktop, mcp_add_json, mcp_get, mcp_get_server_status, mcp_list,
@@ -35,7 +36,8 @@ use commands::mcp::{
 };
 
 use commands::usage::{
-    get_session_stats, get_usage_by_date_range, get_usage_details, get_usage_stats,
+    get_session_stats, get_usage_by_date_range, get_usage_details, get_usage_stats, test_claude_paths,
+    clear_usage_cache, get_usage_cache_stats,
 };
 use process::ProcessRegistryState;
 use std::sync::Mutex;
@@ -84,6 +86,9 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             list_projects,
+            refresh_projects_cache,
+            get_projects_cache_stats,
+            clear_projects_cache,
             get_project_sessions,
             get_claude_settings,
             open_new_session,
@@ -149,6 +154,9 @@ fn main() {
             get_usage_by_date_range,
             get_usage_details,
             get_session_stats,
+            test_claude_paths,
+            clear_usage_cache,
+            get_usage_cache_stats,
             mcp_add,
             mcp_list,
             mcp_get,

@@ -3,6 +3,7 @@
 // Declare modules
 pub mod checkpoint;
 pub mod claude_binary;
+pub mod claude_paths;
 pub mod commands;
 pub mod process;
 

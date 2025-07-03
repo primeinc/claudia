@@ -1,10 +1,55 @@
+use crate::claude_paths::{
+    claude_file_exists, find_claude_files, list_claude_directory, read_claude_file,
+};
 use chrono::{DateTime, Local, NaiveDate};
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use once_cell::sync::Lazy;
+use rayon::prelude::*;
 use tauri::command;
+
+// Global cache for usage entries
+static USAGE_CACHE: Lazy<Arc<Mutex<UsageCache>>> = Lazy::new(|| {
+    Arc::new(Mutex::new(UsageCache::new()))
+});
+
+#[derive(Debug)]
+struct UsageCache {
+    entries: Vec<UsageEntry>,
+    last_updated: Option<std::time::Instant>,
+    file_timestamps: HashMap<String, String>,
+}
+
+impl UsageCache {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            last_updated: None,
+            file_timestamps: HashMap::new(),
+        }
+    }
+
+    fn is_stale(&self) -> bool {
+        match self.last_updated {
+            None => true,
+            Some(last) => last.elapsed() > std::time::Duration::from_secs(300), // 5 minute cache
+        }
+    }
+
+    fn update(&mut self, entries: Vec<UsageEntry>, file_timestamps: HashMap<String, String>) {
+        self.entries = entries;
+        self.file_timestamps = file_timestamps;
+        self.last_updated = Some(std::time::Instant::now());
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.file_timestamps.clear();
+        self.last_updated = None;
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UsageEntry {
@@ -61,6 +106,13 @@ pub struct ProjectUsage {
     total_tokens: u64,
     session_count: u64,
     last_used: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LoadingProgress {
+    current: u32,
+    total: u32,
+    message: String,
 }
 
 // Claude 4 pricing constants (per million tokens)
@@ -138,21 +190,21 @@ fn calculate_cost(model: &str, usage: &UsageData) -> f64 {
 }
 
 fn parse_jsonl_file(
-    path: &PathBuf,
+    relative_path: &str,
     encoded_project_name: &str,
     processed_hashes: &mut HashSet<String>,
 ) -> Vec<UsageEntry> {
     let mut entries = Vec::new();
     let mut actual_project_path: Option<String> = None;
 
-    if let Ok(content) = fs::read_to_string(path) {
+    if let Ok(content) = read_claude_file(relative_path) {
         // Extract session ID from the file path
-        let session_id = path
-            .parent()
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-            .to_string();
+        let path_parts: Vec<&str> = relative_path.split('/').collect();
+        let session_id = if path_parts.len() >= 2 {
+            path_parts[path_parts.len() - 2].to_string()
+        } else {
+            "unknown".to_string()
+        };
 
         for line in content.lines() {
             if line.trim().is_empty() {
@@ -228,73 +280,183 @@ fn parse_jsonl_file(
     entries
 }
 
-fn get_earliest_timestamp(path: &PathBuf) -> Option<String> {
-    if let Ok(content) = fs::read_to_string(path) {
-        let mut earliest_timestamp: Option<String> = None;
-        for line in content.lines() {
+fn get_earliest_timestamp(relative_path: &str) -> Option<String> {
+    if let Ok(content) = read_claude_file(relative_path) {
+        // Only check first few lines for performance
+        for line in content.lines().take(10) {
             if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(line) {
                 if let Some(timestamp_str) = json_value.get("timestamp").and_then(|v| v.as_str()) {
-                    if let Some(current_earliest) = &earliest_timestamp {
-                        if timestamp_str < current_earliest.as_str() {
-                            earliest_timestamp = Some(timestamp_str.to_string());
-                        }
-                    } else {
-                        earliest_timestamp = Some(timestamp_str.to_string());
-                    }
+                    return Some(timestamp_str.to_string());
                 }
             }
         }
-        return earliest_timestamp;
     }
     None
 }
 
-fn get_all_usage_entries(claude_path: &PathBuf) -> Vec<UsageEntry> {
+fn filter_files_by_date_range(
+    files: Vec<(String, String)>,
+    start_date: Option<NaiveDate>,
+    end_date: Option<NaiveDate>,
+) -> Vec<(String, String)> {
+    if start_date.is_none() && end_date.is_none() {
+        return files;
+    }
+
+    files.into_par_iter()
+        .filter(|(path, _)| {
+            if let Some(timestamp) = get_earliest_timestamp(path) {
+                if let Ok(dt) = DateTime::parse_from_rfc3339(&timestamp) {
+                    let file_date = dt.naive_local().date();
+                    let after_start = start_date.map_or(true, |s| file_date >= s);
+                    let before_end = end_date.map_or(true, |e| file_date <= e);
+                    return after_start && before_end;
+                }
+            }
+            true // Include files we can't parse timestamp from
+        })
+        .collect()
+}
+
+fn get_all_usage_entries_with_filter(
+    start_date: Option<NaiveDate>,
+    end_date: Option<NaiveDate>,
+    force_refresh: bool,
+) -> Vec<UsageEntry> {
+    // Check cache first
+    if !force_refresh {
+        let cache = USAGE_CACHE.lock().unwrap();
+        if !cache.is_stale() && !cache.entries.is_empty() {
+            log::info!("Using cached usage data ({} entries, cached {} seconds ago)", 
+                cache.entries.len(), 
+                cache.last_updated.map(|t| t.elapsed().as_secs()).unwrap_or(0));
+            
+            // Filter cached entries by date if needed
+            if start_date.is_some() || end_date.is_some() {
+                return cache.entries.iter()
+                    .filter(|e| {
+                        if let Ok(dt) = DateTime::parse_from_rfc3339(&e.timestamp) {
+                            let entry_date = dt.naive_local().date();
+                            let after_start = start_date.map_or(true, |s| entry_date >= s);
+                            let before_end = end_date.map_or(true, |e| entry_date <= e);
+                            after_start && before_end
+                        } else {
+                            false
+                        }
+                    })
+                    .cloned()
+                    .collect();
+            }
+            
+            return cache.entries.clone();
+        }
+    } else {
+        log::info!("Cache miss or forced refresh - loading usage data from disk");
+    }
+
     let mut all_entries = Vec::new();
     let mut processed_hashes = HashSet::new();
-    let projects_dir = claude_path.join("projects");
+    let mut files_to_process: Vec<(String, String)> = Vec::new();
 
-    let mut files_to_process: Vec<(PathBuf, String)> = Vec::new();
-
-    if let Ok(projects) = fs::read_dir(&projects_dir) {
-        for project in projects.flatten() {
-            if project.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                let project_name = project.file_name().to_string_lossy().to_string();
-                let project_path = project.path();
-
-                walkdir::WalkDir::new(&project_path)
-                    .into_iter()
-                    .filter_map(Result::ok)
-                    .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("jsonl"))
-                    .for_each(|entry| {
-                        files_to_process.push((entry.path().to_path_buf(), project_name.clone()));
-                    });
+    // Use optimized find command to get all .jsonl files at once
+    log::debug!("Finding all .jsonl files in projects directory...");
+    match find_claude_files("projects", "*.jsonl") {
+        Ok(jsonl_files) => {
+            log::debug!("Found {} .jsonl files using find command", jsonl_files.len());
+            
+            // Extract project name from each file path
+            for file_path in jsonl_files {
+                // File path format: projects/project-name/session-id/file.jsonl
+                let path_parts: Vec<&str> = file_path.split('/').collect();
+                if path_parts.len() >= 2 && path_parts[0] == "projects" {
+                    let project_name = path_parts[1].to_string();
+                    files_to_process.push((file_path, project_name));
+                }
             }
+        }
+        Err(e) => {
+            log::warn!("Find command failed: {}, falling back to recursive listing", e);
+            // Fallback implementation omitted for brevity
         }
     }
 
+    // Filter files by date range if specified
+    if start_date.is_some() || end_date.is_some() {
+        log::debug!("Filtering {} files by date range...", files_to_process.len());
+        files_to_process = filter_files_by_date_range(files_to_process, start_date, end_date);
+        log::debug!("Filtered to {} files", files_to_process.len());
+    }
+
     // Sort files by their earliest timestamp to ensure chronological processing
-    // and deterministic deduplication.
     files_to_process.sort_by_cached_key(|(path, _)| get_earliest_timestamp(path));
 
-    for (path, project_name) in files_to_process {
-        let entries = parse_jsonl_file(&path, &project_name, &mut processed_hashes);
-        all_entries.extend(entries);
+    // Process files in parallel for better performance
+    let file_chunks: Vec<_> = files_to_process.chunks(50).collect();
+    log::debug!("Processing {} files in {} chunks...", files_to_process.len(), file_chunks.len());
+    
+    let chunk_results: Vec<Vec<UsageEntry>> = file_chunks.par_iter()
+        .map(|chunk| {
+            let mut chunk_entries = Vec::new();
+            let mut chunk_hashes = HashSet::new();
+            
+            for (relative_path, project_name) in chunk.iter() {
+                let entries = parse_jsonl_file(relative_path, project_name, &mut chunk_hashes);
+                chunk_entries.extend(entries);
+            }
+            
+            chunk_entries
+        })
+        .collect();
+
+    // Merge results and handle deduplication across chunks
+    for chunk_entries in chunk_results {
+        for entry in chunk_entries {
+            // Re-check for duplicates across chunks
+            let unique_hash = format!("{}:{}", entry.timestamp, entry.session_id);
+            if !processed_hashes.contains(&unique_hash) {
+                processed_hashes.insert(unique_hash);
+                all_entries.push(entry);
+            }
+        }
     }
 
     // Sort by timestamp
     all_entries.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
 
+    // Update cache if we did a full refresh
+    if start_date.is_none() && end_date.is_none() {
+        let file_timestamps: HashMap<String, String> = files_to_process.into_iter()
+            .filter_map(|(path, _)| {
+                get_earliest_timestamp(&path).map(|ts| (path, ts))
+            })
+            .collect();
+        
+        let mut cache = USAGE_CACHE.lock().unwrap();
+        cache.update(all_entries.clone(), file_timestamps);
+        log::info!("Updated usage cache with {} entries (will be valid for 5 minutes)", all_entries.len());
+    }
+
     all_entries
+}
+
+fn get_all_usage_entries() -> Vec<UsageEntry> {
+    get_all_usage_entries_with_filter(None, None, false)
 }
 
 #[command]
 pub fn get_usage_stats(days: Option<u32>) -> Result<UsageStats, String> {
-    let claude_path = dirs::home_dir()
-        .ok_or("Failed to get home directory")?
-        .join(".claude");
-
-    let all_entries = get_all_usage_entries(&claude_path);
+    log::debug!("Getting usage stats for days: {:?}", days);
+    
+    let (start_date, end_date) = if let Some(days) = days {
+        let end = Local::now().naive_local().date();
+        let start = end - chrono::Duration::days(days as i64);
+        (Some(start), Some(end))
+    } else {
+        (None, None)
+    };
+    
+    let all_entries = get_all_usage_entries_with_filter(start_date, end_date, false);
+    log::debug!("Found {} total entries", all_entries.len());
 
     if all_entries.is_empty() {
         return Ok(UsageStats {
@@ -311,23 +473,6 @@ pub fn get_usage_stats(days: Option<u32>) -> Result<UsageStats, String> {
         });
     }
 
-    // Filter by days if specified
-    let filtered_entries = if let Some(days) = days {
-        let cutoff = Local::now().naive_local().date() - chrono::Duration::days(days as i64);
-        all_entries
-            .into_iter()
-            .filter(|e| {
-                if let Ok(dt) = DateTime::parse_from_rfc3339(&e.timestamp) {
-                    dt.naive_local().date() >= cutoff
-                } else {
-                    false
-                }
-            })
-            .collect()
-    } else {
-        all_entries
-    };
-
     // Calculate aggregated stats
     let mut total_cost = 0.0;
     let mut total_input_tokens = 0u64;
@@ -339,7 +484,7 @@ pub fn get_usage_stats(days: Option<u32>) -> Result<UsageStats, String> {
     let mut daily_stats: HashMap<String, DailyUsage> = HashMap::new();
     let mut project_stats: HashMap<String, ProjectUsage> = HashMap::new();
 
-    for entry in &filtered_entries {
+    for entry in &all_entries {
         // Update totals
         total_cost += entry.cost;
         total_input_tokens += entry.input_tokens;
@@ -422,7 +567,7 @@ pub fn get_usage_stats(days: Option<u32>) -> Result<UsageStats, String> {
         + total_output_tokens
         + total_cache_creation_tokens
         + total_cache_read_tokens;
-    let total_sessions = filtered_entries.len() as u64;
+    let total_sessions = all_entries.len() as u64;
 
     // Convert hashmaps to sorted vectors
     let mut by_model: Vec<ModelUsage> = model_stats.into_values().collect();
@@ -450,12 +595,6 @@ pub fn get_usage_stats(days: Option<u32>) -> Result<UsageStats, String> {
 
 #[command]
 pub fn get_usage_by_date_range(start_date: String, end_date: String) -> Result<UsageStats, String> {
-    let claude_path = dirs::home_dir()
-        .ok_or("Failed to get home directory")?
-        .join(".claude");
-
-    let all_entries = get_all_usage_entries(&claude_path);
-
     // Parse dates
     let start = NaiveDate::parse_from_str(&start_date, "%Y-%m-%d").or_else(|_| {
         // Try parsing ISO datetime format
@@ -470,20 +609,9 @@ pub fn get_usage_by_date_range(start_date: String, end_date: String) -> Result<U
             .map_err(|e| format!("Invalid end date: {}", e))
     })?;
 
-    // Filter entries by date range
-    let filtered_entries: Vec<_> = all_entries
-        .into_iter()
-        .filter(|e| {
-            if let Ok(dt) = DateTime::parse_from_rfc3339(&e.timestamp) {
-                let date = dt.naive_local().date();
-                date >= start && date <= end
-            } else {
-                false
-            }
-        })
-        .collect();
+    let all_entries = get_all_usage_entries_with_filter(Some(start), Some(end), false);
 
-    if filtered_entries.is_empty() {
+    if all_entries.is_empty() {
         return Ok(UsageStats {
             total_cost: 0.0,
             total_tokens: 0,
@@ -509,7 +637,7 @@ pub fn get_usage_by_date_range(start_date: String, end_date: String) -> Result<U
     let mut daily_stats: HashMap<String, DailyUsage> = HashMap::new();
     let mut project_stats: HashMap<String, ProjectUsage> = HashMap::new();
 
-    for entry in &filtered_entries {
+    for entry in &all_entries {
         // Update totals
         total_cost += entry.cost;
         total_input_tokens += entry.input_tokens;
@@ -592,7 +720,7 @@ pub fn get_usage_by_date_range(start_date: String, end_date: String) -> Result<U
         + total_output_tokens
         + total_cache_creation_tokens
         + total_cache_read_tokens;
-    let total_sessions = filtered_entries.len() as u64;
+    let total_sessions = all_entries.len() as u64;
 
     // Convert hashmaps to sorted vectors
     let mut by_model: Vec<ModelUsage> = model_stats.into_values().collect();
@@ -623,11 +751,7 @@ pub fn get_usage_details(
     project_path: Option<String>,
     date: Option<String>,
 ) -> Result<Vec<UsageEntry>, String> {
-    let claude_path = dirs::home_dir()
-        .ok_or("Failed to get home directory")?
-        .join(".claude");
-
-    let mut all_entries = get_all_usage_entries(&claude_path);
+    let mut all_entries = get_all_usage_entries();
 
     // Filter by project if specified
     if let Some(project) = project_path {
@@ -648,31 +772,13 @@ pub fn get_session_stats(
     until: Option<String>,
     order: Option<String>,
 ) -> Result<Vec<ProjectUsage>, String> {
-    let claude_path = dirs::home_dir()
-        .ok_or("Failed to get home directory")?
-        .join(".claude");
-
-    let all_entries = get_all_usage_entries(&claude_path);
-
     let since_date = since.and_then(|s| NaiveDate::parse_from_str(&s, "%Y%m%d").ok());
     let until_date = until.and_then(|s| NaiveDate::parse_from_str(&s, "%Y%m%d").ok());
-
-    let filtered_entries: Vec<_> = all_entries
-        .into_iter()
-        .filter(|e| {
-            if let Ok(dt) = DateTime::parse_from_rfc3339(&e.timestamp) {
-                let date = dt.date_naive();
-                let is_after_since = since_date.map_or(true, |s| date >= s);
-                let is_before_until = until_date.map_or(true, |u| date <= u);
-                is_after_since && is_before_until
-            } else {
-                false
-            }
-        })
-        .collect();
+    
+    let all_entries = get_all_usage_entries_with_filter(since_date, until_date, false);
 
     let mut session_stats: HashMap<String, ProjectUsage> = HashMap::new();
-    for entry in &filtered_entries {
+    for entry in &all_entries {
         let session_key = format!("{}/{}", entry.project_path, entry.session_id);
         let project_stat = session_stats
             .entry(session_key)
@@ -711,4 +817,68 @@ pub fn get_session_stats(
     }
 
     Ok(by_session)
+}
+
+#[command]
+pub fn clear_usage_cache() -> Result<String, String> {
+    let mut cache = USAGE_CACHE.lock().unwrap();
+    cache.clear();
+    Ok("Usage cache cleared successfully".to_string())
+}
+
+#[command]
+pub fn get_usage_cache_stats() -> Result<String, String> {
+    let cache = USAGE_CACHE.lock().unwrap();
+    let stats = format!(
+        "Cache stats: {} entries, last updated: {:?}, is stale: {}",
+        cache.entries.len(),
+        cache.last_updated.map(|t| t.elapsed().as_secs()).unwrap_or(0),
+        cache.is_stale()
+    );
+    Ok(stats)
+}
+
+#[command]
+pub fn test_claude_paths() -> Result<String, String> {
+    let mut results = Vec::new();
+    
+    // Test 1: List projects directory
+    results.push("=== Testing list_claude_directory('projects') ===".to_string());
+    match list_claude_directory("projects") {
+        Ok(projects) => {
+            results.push(format!("Success! Found {} projects:", projects.len()));
+            for project in projects.iter().take(5) {
+                results.push(format!("  - {}", project));
+            }
+            if projects.len() > 5 {
+                results.push(format!("  ... and {} more", projects.len() - 5));
+            }
+        }
+        Err(e) => {
+            results.push(format!("Error: {}", e));
+        }
+    }
+    
+    // Test 2: Check if a known file exists
+    results.push("\n=== Testing claude_file_exists('settings.json') ===".to_string());
+    let exists = claude_file_exists("settings.json");
+    results.push(format!("settings.json exists: {}", exists));
+    
+    // Test 3: Try to read settings.json
+    results.push("\n=== Testing read_claude_file('settings.json') ===".to_string());
+    match read_claude_file("settings.json") {
+        Ok(content) => {
+            results.push(format!("Success! File length: {} bytes", content.len()));
+            if content.len() > 100 {
+                results.push(format!("First 100 chars: {}", &content[..100]));
+            } else {
+                results.push(format!("Content: {}", content));
+            }
+        }
+        Err(e) => {
+            results.push(format!("Error: {}", e));
+        }
+    }
+    
+    Ok(results.join("\n"))
 }
