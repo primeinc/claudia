@@ -418,6 +418,10 @@ pub fn ensure_cache_directory() -> Result<(), String> {
 
 /// Read a cache file from ~/.claudia/cache/
 pub fn read_cache_file(cache_name: &str) -> Result<String, String> {
+    // Validate cache name to prevent path traversal
+    if cache_name.contains("..") || cache_name.contains("/") || cache_name.contains("\\") {
+        return Err("Invalid cache file name".to_string());
+    }
     #[cfg(target_os = "windows")]
     {
         let userprofile = std::env::var("USERPROFILE")
@@ -441,6 +445,11 @@ pub fn read_cache_file(cache_name: &str) -> Result<String, String> {
 
 /// Write a cache file to ~/.claudia/cache/
 pub fn write_cache_file(cache_name: &str, content: &str) -> Result<(), String> {
+    // Validate cache name to prevent path traversal
+    if cache_name.contains("..") || cache_name.contains("/") || cache_name.contains("\\") {
+        return Err("Invalid cache file name".to_string());
+    }
+    
     // Ensure cache directory exists first
     ensure_cache_directory()?;
     
@@ -467,6 +476,10 @@ pub fn write_cache_file(cache_name: &str, content: &str) -> Result<(), String> {
 
 /// Check if a cache file exists and get its modification time
 pub fn get_cache_file_metadata(cache_name: &str) -> Result<u64, String> {
+    // Validate cache name to prevent path traversal
+    if cache_name.contains("..") || cache_name.contains("/") || cache_name.contains("\\") {
+        return Err("Invalid cache file name".to_string());
+    }
     #[cfg(target_os = "windows")]
     {
         let userprofile = std::env::var("USERPROFILE")

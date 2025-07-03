@@ -153,7 +153,7 @@ impl ProjectsCache {
             file_metadata: self.file_metadata.clone(),
         };
         
-        let json = serde_json::to_string_pretty(&cache_data)
+        let json = serde_json::to_string(&cache_data)
             .map_err(|e| format!("Failed to serialize projects cache: {}", e))?;
         
         write_cache_file("projects.json", &json)

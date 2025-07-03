@@ -111,7 +111,7 @@ impl UsageCache {
             file_timestamps: self.file_timestamps.clone(),
         };
         
-        let json = serde_json::to_string_pretty(&cache_data)
+        let json = serde_json::to_string(&cache_data)
             .map_err(|e| format!("Failed to serialize usage cache: {}", e))?;
         
         write_cache_file("usage.json", &json)
