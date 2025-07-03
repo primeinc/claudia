@@ -384,7 +384,7 @@ pub fn ensure_cache_directory() -> Result<(), String> {
             .map_err(|_| "USERPROFILE environment variable not found".to_string())?;
         
         let output = std::process::Command::new("cmd")
-            .args(&["/C", "if", "not", "exist", &format!("{}/.claudia", userprofile), "mkdir", &format!("{}/.claudia", userprofile)])
+            .args(&["/C", "if", "not", "exist", &format!("{}\\.claudia", userprofile), "mkdir", &format!("{}\\.claudia", userprofile)])
             .output()
             .map_err(|e| format!("Failed to create .claudia directory: {}", e))?;
             
@@ -394,7 +394,7 @@ pub fn ensure_cache_directory() -> Result<(), String> {
         
         // Create cache subdirectory
         let output = std::process::Command::new("cmd")
-            .args(&["/C", "if", "not", "exist", &format!("{}/.claudia/cache", userprofile), "mkdir", &format!("{}/.claudia/cache", userprofile)])
+            .args(&["/C", "if", "not", "exist", &format!("{}\\.claudia\\cache", userprofile), "mkdir", &format!("{}\\.claudia\\cache", userprofile)])
             .output()
             .map_err(|e| format!("Failed to create cache directory: {}", e))?;
             
@@ -427,7 +427,7 @@ pub fn read_cache_file(cache_name: &str) -> Result<String, String> {
         let userprofile = std::env::var("USERPROFILE")
             .map_err(|_| "USERPROFILE environment variable not found".to_string())?;
         
-        let cache_path = format!("{}/.claudia/cache/{}", userprofile, cache_name);
+        let cache_path = format!("{}\\.claudia\\cache\\{}", userprofile, cache_name);
         
         std::fs::read_to_string(&cache_path)
             .map_err(|e| format!("Failed to read cache file {}: {}", cache_name, e))
@@ -458,7 +458,7 @@ pub fn write_cache_file(cache_name: &str, content: &str) -> Result<(), String> {
         let userprofile = std::env::var("USERPROFILE")
             .map_err(|_| "USERPROFILE environment variable not found".to_string())?;
         
-        let cache_path = format!("{}/.claudia/cache/{}", userprofile, cache_name);
+        let cache_path = format!("{}\\.claudia\\cache\\{}", userprofile, cache_name);
         
         std::fs::write(&cache_path, content)
             .map_err(|e| format!("Failed to write cache file {}: {}", cache_name, e))
@@ -485,7 +485,7 @@ pub fn get_cache_file_metadata(cache_name: &str) -> Result<u64, String> {
         let userprofile = std::env::var("USERPROFILE")
             .map_err(|_| "USERPROFILE environment variable not found".to_string())?;
         
-        let cache_path = format!("{}/.claudia/cache/{}", userprofile, cache_name);
+        let cache_path = format!("{}\\.claudia\\cache\\{}", userprofile, cache_name);
         
         let metadata = std::fs::metadata(&cache_path)
             .map_err(|e| format!("Failed to read cache metadata {}: {}", cache_name, e))?;
