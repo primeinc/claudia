@@ -6,7 +6,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use crate::claude_paths::{
     find_claude_files, get_claude_metadata, list_claude_directory, read_claude_file,
-    read_cache_file, write_cache_file, get_cache_file_metadata,
+    read_cache_file, write_cache_file,
 };
 use crate::commands::claude::Project;
 
@@ -163,19 +163,6 @@ impl ProjectsCache {
         Ok(())
     }
 
-    fn is_disk_cache_valid(&self) -> bool {
-        match get_cache_file_metadata("projects.json") {
-            Ok(modified_time) => {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                
-                now <= modified_time + PROJECTS_CACHE_TTL
-            }
-            Err(_) => false,
-        }
-    }
 }
 
 /// Optimized function to get all projects with caching and parallel processing

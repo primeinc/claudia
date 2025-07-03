@@ -1,6 +1,6 @@
 use crate::claude_paths::{
     claude_file_exists, find_claude_files, list_claude_directory, read_claude_file,
-    read_cache_file, write_cache_file, get_cache_file_metadata,
+    read_cache_file, write_cache_file,
 };
 use chrono::{DateTime, Local, NaiveDate};
 use serde::{Deserialize, Serialize};
@@ -121,19 +121,6 @@ impl UsageCache {
         Ok(())
     }
 
-    fn is_disk_cache_valid(&self) -> bool {
-        match get_cache_file_metadata("usage.json") {
-            Ok(modified_time) => {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                
-                now <= modified_time + USAGE_CACHE_TTL
-            }
-            Err(_) => false,
-        }
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
