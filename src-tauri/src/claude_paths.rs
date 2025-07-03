@@ -477,7 +477,7 @@ pub fn get_cache_file_metadata(cache_name: &str) -> Result<u64, String> {
         let metadata = std::fs::metadata(&cache_path)
             .map_err(|e| format!("Failed to read cache metadata {}: {}", cache_name, e))?;
         
-        metadata.modified()
+        let timestamp = metadata.modified()
             .map_err(|e| format!("Failed to get modification time: {}", e))?
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| format!("Failed to convert time: {}", e))?
@@ -494,7 +494,7 @@ pub fn get_cache_file_metadata(cache_name: &str) -> Result<u64, String> {
         let metadata = std::fs::metadata(&cache_path)
             .map_err(|e| format!("Failed to read cache metadata {}: {}", cache_name, e))?;
         
-        metadata.modified()
+        let timestamp = metadata.modified()
             .map_err(|e| format!("Failed to get modification time: {}", e))?
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| format!("Failed to convert time: {}", e))?
