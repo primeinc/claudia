@@ -8,35 +8,44 @@ use std::time::SystemTime;
 use once_cell::sync::Lazy;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
+#[cfg(target_os = "windows")]
+use walkdir::WalkDir;
+#[cfg(target_os = "windows")]
+use glob::Pattern;
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[cfg(target_os = "windows")]
-static WSL_HOME_DIR: Lazy<Result<String, String>> = Lazy::new(|| {
+static CLAUDE_UNC_PATH: Lazy<Result<PathBuf, String>> = Lazy::new(|| {
+    // Run once at startup to get the UNC path to ~/.claude
     let output = std::process::Command::new("wsl")
-        .args(&["--", "echo", "$HOME"])
+        .args(&["--", "sh", "-c", "cd ~/.claude && wslpath -w ."])
         .creation_flags(CREATE_NO_WINDOW)
         .output()
-        .map_err(|e| format!("Failed to get WSL home directory: {}", e))?;
+        .map_err(|e| format!("Failed to get Claude UNC path: {}", e))?;
     
     if !output.status.success() {
-        return Err("Failed to get WSL home directory".to_string());
+        let stderr = String::from_utf8_lossy(&output.stderr)
+            .replace('\r', "");
+        return Err(format!("Failed to get Claude UNC path: {}", stderr.trim()));
     }
     
-    Ok(String::from_utf8_lossy(&output.stdout)
+    let path_str = String::from_utf8_lossy(&output.stdout)
         .replace('\r', "")
         .trim()
-        .to_string())
+        .to_string();
+    
+    log::info!("[UNC_PATH] wslpath returned: {}", path_str);
+    
+    Ok(PathBuf::from(path_str))
 });
 
-/// Get the WSL home directory path (cached)
+/// Get the full UNC path for a relative path within ~/.claude
 #[cfg(target_os = "windows")]
-fn get_wsl_home_dir() -> Result<String, String> {
-    match WSL_HOME_DIR.as_ref() {
-        Ok(dir) => Ok(dir.clone()),
-        Err(e) => Err(e.clone()),
-    }
+fn get_claude_unc_path(relative_path: &str) -> Result<PathBuf, String> {
+    let base = CLAUDE_UNC_PATH.as_ref().map_err(|e| e.clone())?;
+    Ok(base.join(relative_path))
 }
 
 /// Gets the Claude configuration directory path
@@ -56,24 +65,19 @@ pub fn get_claude_dir() -> Result<PathBuf, anyhow::Error> {
 /// Read a file from the Claude directory
 #[cfg(target_os = "windows")]
 pub fn read_claude_file(relative_path: &str) -> Result<String, String> {
-    let home_dir = get_wsl_home_dir()?;
+    let file_path = get_claude_unc_path(relative_path)?;
+    log::debug!("[READ_FILE] Attempting to read: {}", file_path.display());
     
-    let output = std::process::Command::new("wsl")
-        .args(&["--", "cat", &format!("{}/.claude/{}", home_dir, relative_path)])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("Failed to run WSL command: {}", e))?;
-    
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr)
-            .replace('\r', "");
-        return Err(format!("File not found: {} ({})", relative_path, stderr.trim()));
+    match std::fs::read_to_string(&file_path) {
+        Ok(content) => {
+            log::debug!("[READ_FILE] Successfully read {} bytes from {}", content.len(), relative_path);
+            Ok(content)
+        }
+        Err(e) => {
+            log::error!("[READ_FILE] Failed to read {}: {} (full path: {})", relative_path, e, file_path.display());
+            Err(format!("Failed to read file {}: {}", relative_path, e))
+        }
     }
-    
-    let stdout = String::from_utf8_lossy(&output.stdout)
-        .replace('\r', "")
-        .to_string();
-    Ok(stdout)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -87,31 +91,16 @@ pub fn read_claude_file(relative_path: &str) -> Result<String, String> {
 /// Write a file to the Claude directory
 #[cfg(target_os = "windows")]
 pub fn write_claude_file(relative_path: &str, content: &str) -> Result<(), String> {
-    let home_dir = get_wsl_home_dir()?;
+    let file_path = get_claude_unc_path(relative_path)?;
     
-    let mut cmd = std::process::Command::new("wsl");
-    cmd.args(&["--", "sh", "-c", &format!("cat > {}/.claude/{}", home_dir, relative_path)]);
-    cmd.stdin(std::process::Stdio::piped());
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    
-    let mut child = cmd.spawn()
-        .map_err(|e| format!("Failed to run WSL command: {}", e))?;
-    
-    if let Some(stdin) = child.stdin.as_mut() {
-        use std::io::Write;
-        stdin.write_all(content.as_bytes())
-            .map_err(|e| format!("Failed to write to WSL stdin: {}", e))?;
+    // Ensure parent directory exists
+    if let Some(parent) = file_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create parent directory: {}", e))?;
     }
     
-    let output = child.wait_with_output()
-        .map_err(|e| format!("Failed to wait for WSL command: {}", e))?;
-    
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Failed to write file: {} ({})", relative_path, stderr.trim()));
-    }
-    
-    Ok(())
+    std::fs::write(&file_path, content)
+        .map_err(|e| format!("Failed to write file {}: {}", relative_path, e))
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -125,25 +114,25 @@ pub fn write_claude_file(relative_path: &str, content: &str) -> Result<(), Strin
 /// List files in a Claude directory
 #[cfg(target_os = "windows")]
 pub fn list_claude_directory(relative_path: &str) -> Result<Vec<String>, String> {
-    let home_dir = get_wsl_home_dir()?;
+    let dir_path = get_claude_unc_path(relative_path)?;
     
-    let output = std::process::Command::new("wsl")
-        .args(&["--", "ls", "-1a", &format!("{}/.claude/{}", home_dir, relative_path)])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("Failed to run WSL command: {}", e))?;
-    
-    if !output.status.success() {
-        return Ok(Vec::new()); // Directory might not exist
+    if !dir_path.exists() {
+        return Ok(Vec::new());
     }
     
-    let output_str = String::from_utf8_lossy(&output.stdout)
-        .replace('\r', "");
-    Ok(output_str
-        .lines()
-        .map(|s| s.to_string())
-        .filter(|s| !s.is_empty() && s != "." && s != "..")
-        .collect())
+    let entries = std::fs::read_dir(&dir_path)
+        .map_err(|e| format!("Failed to read directory {}: {}", relative_path, e))?;
+    
+    let mut names = Vec::new();
+    for entry in entries {
+        if let Ok(entry) = entry {
+            if let Some(name) = entry.file_name().to_str() {
+                names.push(name.to_string());
+            }
+        }
+    }
+    
+    Ok(names)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -173,18 +162,10 @@ pub fn list_claude_directory(relative_path: &str) -> Result<Vec<String>, String>
 /// Check if a file exists in the Claude directory
 #[cfg(target_os = "windows")]
 pub fn claude_file_exists(relative_path: &str) -> bool {
-    match get_wsl_home_dir() {
-        Ok(home_dir) => {
-            match std::process::Command::new("wsl")
-                .args(&["--", "test", "-f", &format!("{}/.claude/{}", home_dir, relative_path)])
-                .creation_flags(CREATE_NO_WINDOW)
-                .status() {
-                Ok(status) => status.success(),
-                Err(_) => false,
-            }
-        },
-        Err(_) => false,
-    }
+    get_claude_unc_path(relative_path)
+        .ok()
+        .map(|p| p.exists())
+        .unwrap_or(false)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -199,26 +180,18 @@ pub fn claude_file_exists(relative_path: &str) -> bool {
 /// Get file/directory metadata (modification time)
 #[cfg(target_os = "windows")]
 pub fn get_claude_metadata(relative_path: &str) -> Result<u64, String> {
-    let home_dir = get_wsl_home_dir()?;
+    let path = get_claude_unc_path(relative_path)?;
     
-    // On Windows/WSL, we'll use the modification time since creation time isn't reliable
-    let output = std::process::Command::new("wsl")
-        .args(&["--", "stat", "-c", "%Y", &format!("{}/.claude/{}", home_dir, relative_path)])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("Failed to run WSL stat command: {}", e))?;
+    let metadata = std::fs::metadata(&path)
+        .map_err(|e| format!("Failed to read metadata: {}", e))?;
     
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Failed to get file metadata: {}", stderr.trim()));
-    }
+    let timestamp = metadata.modified()
+        .map_err(|e| format!("Failed to get modification time: {}", e))?
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| format!("Failed to convert time: {}", e))?
+        .as_secs();
     
-    let timestamp_str = String::from_utf8_lossy(&output.stdout)
-        .replace('\r', "")
-        .trim()
-        .to_string();
-    timestamp_str.parse::<u64>()
-        .map_err(|e| format!("Failed to parse timestamp: {}", e))
+    Ok(timestamp)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -244,20 +217,10 @@ pub fn get_claude_metadata(relative_path: &str) -> Result<u64, String> {
 #[cfg(target_os = "windows")]
 #[allow(dead_code)]
 pub fn create_claude_directory(relative_path: &str) -> Result<(), String> {
-    let home_dir = get_wsl_home_dir()?;
+    let dir_path = get_claude_unc_path(relative_path)?;
     
-    let output = std::process::Command::new("wsl")
-        .args(&["--", "mkdir", "-p", &format!("{}/.claude/{}", home_dir, relative_path)])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("Failed to run WSL command: {}", e))?;
-    
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Failed to create directory: {} ({})", relative_path, stderr.trim()));
-    }
-    
-    Ok(())
+    std::fs::create_dir_all(&dir_path)
+        .map_err(|e| format!("Failed to create directory {}: {}", relative_path, e))
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -274,17 +237,11 @@ pub fn create_claude_directory(relative_path: &str) -> Result<(), String> {
 #[cfg(target_os = "windows")]
 #[allow(dead_code)]
 pub fn delete_claude_file(relative_path: &str) -> Result<(), String> {
-    let home_dir = get_wsl_home_dir()?;
+    let file_path = get_claude_unc_path(relative_path)?;
     
-    let output = std::process::Command::new("wsl")
-        .args(&["--", "rm", "-f", &format!("{}/.claude/{}", home_dir, relative_path)])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("Failed to run WSL command: {}", e))?;
-    
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Failed to delete file: {} ({})", relative_path, stderr.trim()));
+    if file_path.exists() {
+        std::fs::remove_file(&file_path)
+            .map_err(|e| format!("Failed to delete file {}: {}", relative_path, e))?;
     }
     
     Ok(())
@@ -308,18 +265,10 @@ pub fn delete_claude_file(relative_path: &str) -> Result<(), String> {
 #[cfg(target_os = "windows")]
 #[allow(dead_code)]
 pub fn claude_is_directory(relative_path: &str) -> bool {
-    match get_wsl_home_dir() {
-        Ok(home_dir) => {
-            match std::process::Command::new("wsl")
-                .args(&["--", "test", "-d", &format!("{}/.claude/{}", home_dir, relative_path)])
-                .creation_flags(CREATE_NO_WINDOW)
-                .status() {
-                Ok(status) => status.success(),
-                Err(_) => false,
-            }
-        },
-        Err(_) => false,
-    }
+    get_claude_unc_path(relative_path)
+        .ok()
+        .map(|p| p.is_dir())
+        .unwrap_or(false)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -335,36 +284,41 @@ pub fn claude_is_directory(relative_path: &str) -> bool {
 /// Find all files matching a pattern in the Claude directory (optimized for large directories)
 #[cfg(target_os = "windows")]
 pub fn find_claude_files(relative_path: &str, pattern: &str) -> Result<Vec<String>, String> {
-    let home_dir = get_wsl_home_dir()?;
+    use walkdir::WalkDir;
+    use glob::Pattern;
     
-    let output = std::process::Command::new("wsl")
-        .args(&["--", "find", &format!("{}/.claude/{}", home_dir, relative_path), 
-                "-name", pattern, "-type", "f"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("Failed to run WSL find command: {}", e))?;
+    let search_path = get_claude_unc_path(relative_path)?;
     
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // If directory doesn't exist, return empty list rather than error
-        if stderr.contains("No such file or directory") {
-            return Ok(Vec::new());
-        }
-        return Err(format!("Find command failed: {}", stderr.trim()));
+    if !search_path.exists() {
+        return Ok(Vec::new());
     }
     
-    let output_str = String::from_utf8_lossy(&output.stdout)
-        .replace('\r', "");
-    let base_path = format!("{}/.claude/", home_dir);
+    let base_path = CLAUDE_UNC_PATH.as_ref().map_err(|e| e.clone())?;
+    let glob_pattern = Pattern::new(pattern)
+        .map_err(|e| format!("Invalid pattern {}: {}", pattern, e))?;
     
-    Ok(output_str
-        .lines()
-        .filter(|s| !s.is_empty())
-        .map(|s| {
-            // Remove the base path to get relative paths
-            s.strip_prefix(&base_path).unwrap_or(s).to_string()
-        })
-        .collect())
+    let mut results = Vec::new();
+    
+    for entry in WalkDir::new(&search_path)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if entry.file_type().is_file() {
+            if let Some(file_name) = entry.file_name().to_str() {
+                if glob_pattern.matches(file_name) {
+                    // Convert absolute path to relative path from ~/.claude
+                    if let Ok(relative) = entry.path().strip_prefix(base_path) {
+                        if let Some(relative_str) = relative.to_str() {
+                            // Convert Windows path separators to forward slashes
+                            results.push(relative_str.replace('\\', "/"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(results)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -378,8 +332,11 @@ pub fn find_claude_files(relative_path: &str, pattern: &str) -> Result<Vec<Strin
         return Ok(Vec::new());
     }
     
+    let search_path_str = search_path.to_str()
+        .ok_or_else(|| "Search path contains invalid UTF-8 characters".to_string())?;
+    
     let output = Command::new("find")
-        .args(&[search_path.to_str().unwrap(), "-name", pattern, "-type", "f"])
+        .args(&[search_path_str, "-name", pattern, "-type", "f"])
         .output()
         .map_err(|e| format!("Failed to run find command: {}", e))?;
     
@@ -389,7 +346,8 @@ pub fn find_claude_files(relative_path: &str, pattern: &str) -> Result<Vec<Strin
     }
     
     let output_str = String::from_utf8_lossy(&output.stdout);
-    let claude_dir_str = claude_dir.to_str().unwrap();
+    let claude_dir_str = claude_dir.to_str()
+        .ok_or_else(|| "Claude directory path contains invalid UTF-8 characters".to_string())?;
     
     Ok(output_str
         .lines()
@@ -403,32 +361,18 @@ pub fn find_claude_files(relative_path: &str, pattern: &str) -> Result<Vec<Strin
 
 /// Create the cache directory structure (~/.claudia/cache/)
 pub fn ensure_cache_directory() -> Result<(), String> {
-    // First ensure ~/.claudia exists (for cross-platform compatibility)
+    // Create cache directory using idiomatic std::fs approach for all platforms
     #[cfg(target_os = "windows")]
     {
         let userprofile = std::env::var("USERPROFILE")
             .map_err(|_| "USERPROFILE environment variable not found".to_string())?;
         
-        let output = std::process::Command::new("cmd")
-            .args(&["/C", "if", "not", "exist", &format!("{}\\.claudia", userprofile), "mkdir", &format!("{}\\.claudia", userprofile)])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .map_err(|e| format!("Failed to create .claudia directory: {}", e))?;
-            
-        if !output.status.success() {
-            return Err("Failed to create .claudia directory".to_string());
-        }
+        let cache_dir = PathBuf::from(userprofile)
+            .join(".claudia")
+            .join("cache");
         
-        // Create cache subdirectory
-        let output = std::process::Command::new("cmd")
-            .args(&["/C", "if", "not", "exist", &format!("{}\\.claudia\\cache", userprofile), "mkdir", &format!("{}\\.claudia\\cache", userprofile)])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
+        std::fs::create_dir_all(&cache_dir)
             .map_err(|e| format!("Failed to create cache directory: {}", e))?;
-            
-        if !output.status.success() {
-            return Err("Failed to create cache directory".to_string());
-        }
     }
     
     #[cfg(not(target_os = "windows"))]

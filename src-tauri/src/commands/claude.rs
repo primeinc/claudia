@@ -261,14 +261,26 @@ pub async fn get_project_sessions(project_id: String) -> Result<Vec<Session>, St
 
     // Check if project directory exists
     let project_dir_path = format!("projects/{}", project_id);
-    let session_files = list_claude_directory(&project_dir_path)?;
+    let project_dir_path_clone = project_dir_path.clone();
+    let session_files = tokio::task::spawn_blocking(move || {
+        list_claude_directory(&project_dir_path_clone)
+    })
+    .await
+    .map_err(|e| format!("Failed to execute blocking task: {}", e))??;
     
     if session_files.is_empty() {
         return Err(format!("Project directory not found or empty: {}", project_id));
     }
 
     // Get the actual project path from JSONL files (cached)
-    let project_path = match get_project_path_from_sessions_by_id(&project_id) {
+    let project_id_clone2 = project_id.clone();
+    let project_path_result = tokio::task::spawn_blocking(move || {
+        get_project_path_from_sessions_by_id(&project_id_clone2)
+    })
+    .await
+    .map_err(|e| format!("Failed to execute blocking task: {}", e))?;
+
+    let project_path = match project_path_result {
         Ok(path) => path,
         Err(e) => {
             log::warn!(
@@ -367,7 +379,13 @@ fn extract_first_user_message_from_path(relative_path: &str) -> (Option<String>,
 pub async fn get_claude_settings() -> Result<ClaudeSettings, String> {
     log::info!("Reading Claude settings");
 
-    match read_claude_file("settings.json") {
+    let result = tokio::task::spawn_blocking(move || {
+        read_claude_file("settings.json")
+    })
+    .await
+    .map_err(|e| format!("Failed to execute blocking task: {}", e))?;
+
+    match result {
         Ok(content) => {
             let data: serde_json::Value = serde_json::from_str(&content)
                 .map_err(|e| format!("Failed to parse settings JSON: {}", e))?;
@@ -436,7 +454,13 @@ pub async fn open_new_session(app: AppHandle, path: Option<String>) -> Result<St
 pub async fn get_system_prompt() -> Result<String, String> {
     log::info!("Reading CLAUDE.md system prompt");
 
-    match read_claude_file("CLAUDE.md") {
+    let result = tokio::task::spawn_blocking(move || {
+        read_claude_file("CLAUDE.md")
+    })
+    .await
+    .map_err(|e| format!("Failed to execute blocking task: {}", e))?;
+
+    match result {
         Ok(content) => Ok(content),
         Err(_) => {
             log::warn!("CLAUDE.md not found");
@@ -543,7 +567,12 @@ pub async fn check_claude_version(app: AppHandle) -> Result<ClaudeVersionStatus,
 pub async fn save_system_prompt(content: String) -> Result<String, String> {
     log::info!("Saving CLAUDE.md system prompt");
 
-    write_claude_file("CLAUDE.md", &content)?;
+    tokio::task::spawn_blocking(move || {
+        write_claude_file("CLAUDE.md", &content)
+    })
+    .await
+    .map_err(|e| format!("Failed to execute blocking task: {}", e))?
+    .map_err(|e| format!("Failed to save system prompt: {}", e))?;
 
     Ok("System prompt saved successfully".to_string())
 }
@@ -557,7 +586,12 @@ pub async fn save_claude_settings(settings: serde_json::Value) -> Result<String,
     let json_string = serde_json::to_string_pretty(&settings)
         .map_err(|e| format!("Failed to serialize settings: {}", e))?;
 
-    write_claude_file("settings.json", &json_string)?;
+    tokio::task::spawn_blocking(move || {
+        write_claude_file("settings.json", &json_string)
+    })
+    .await
+    .map_err(|e| format!("Failed to execute blocking task: {}", e))?
+    .map_err(|e| format!("Failed to save settings: {}", e))?;
 
     Ok("Settings saved successfully".to_string())
 }
@@ -694,8 +728,12 @@ pub async fn load_session_history(
 
     let session_path = format!("projects/{}/{}.jsonl", project_id, session_id);
     
-    let content = read_claude_file(&session_path)
-        .map_err(|_| format!("Session file not found: {}", session_id))?;
+    let content = tokio::task::spawn_blocking(move || {
+        read_claude_file(&session_path)
+    })
+    .await
+    .map_err(|e| format!("Failed to execute blocking task: {}", e))?
+    .map_err(|_| format!("Session file not found: {}", session_id))?;
     
     let mut messages = Vec::new();
     
@@ -1362,7 +1400,13 @@ pub async fn create_checkpoint(
     // Always load current session messages from the JSONL file
     let session_path = format!("projects/{}/{}.jsonl", project_id, session_id);
 
-    if let Ok(content) = read_claude_file(&session_path) {
+    let content_result = tokio::task::spawn_blocking(move || {
+        read_claude_file(&session_path)
+    })
+    .await
+    .map_err(|e| format!("Failed to execute blocking task: {}", e))?;
+
+    if let Ok(content) = content_result {
         let mut line_count = 0;
         for line in content.lines() {
             if let Some(index) = message_index {
@@ -1423,7 +1467,12 @@ pub async fn restore_checkpoint(
         .load_checkpoint(&result.checkpoint.project_id, &session_id, &checkpoint_id)
         .map_err(|e| format!("Failed to load checkpoint data: {}", e))?;
 
-    write_claude_file(&session_path, &messages)?;
+    tokio::task::spawn_blocking(move || {
+        write_claude_file(&session_path, &messages)
+    })
+    .await
+    .map_err(|e| format!("Failed to execute blocking task: {}", e))?
+    .map_err(|e| format!("Failed to write session file: {}", e))?;
 
     Ok(result)
 }
@@ -1471,9 +1520,27 @@ pub async fn fork_from_checkpoint(
     let source_session_path = format!("projects/{}/{}.jsonl", project_id, session_id);
     let new_session_path = format!("projects/{}/{}.jsonl", project_id, new_session_id);
 
-    if claude_file_exists(&source_session_path) {
-        let content = read_claude_file(&source_session_path)?;
-        write_claude_file(&new_session_path, &content)?;
+    let source_path_clone = source_session_path.clone();
+    let exists = tokio::task::spawn_blocking(move || {
+        claude_file_exists(&source_path_clone)
+    })
+    .await
+    .map_err(|e| format!("Failed to execute blocking task: {}", e))?;
+
+    if exists {
+        let content = tokio::task::spawn_blocking(move || {
+            read_claude_file(&source_session_path)
+        })
+        .await
+        .map_err(|e| format!("Failed to execute blocking task: {}", e))?
+        .map_err(|e| format!("Failed to read source session: {}", e))?;
+
+        tokio::task::spawn_blocking(move || {
+            write_claude_file(&new_session_path, &content)
+        })
+        .await
+        .map_err(|e| format!("Failed to execute blocking task: {}", e))?
+        .map_err(|e| format!("Failed to write new session: {}", e))?;
     }
 
     // Create manager for the new session

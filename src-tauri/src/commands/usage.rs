@@ -1,3 +1,8 @@
+// Performance note: This module uses rayon for parallel processing of JSONL files.
+// The parallel iterators MUST NOT be wrapped in spawn_blocking as that would
+// force all parallel operations to run sequentially on a single blocking thread.
+// Only the initial directory listing operations should use blocking I/O if needed.
+
 use crate::claude_paths::{
     claude_file_exists, find_claude_files, list_claude_directory, read_claude_file,
     read_cache_file, write_cache_file, get_cache_file_metadata,
@@ -455,9 +460,18 @@ fn filter_files_by_date_range(
         return files;
     }
 
-    files.into_par_iter()
-        .filter(|(path, _)| {
-            if let Some(timestamp) = get_earliest_timestamp(path) {
+    // Process files in parallel, but collect timestamps first to avoid repeated I/O
+    let files_with_timestamps: Vec<_> = files.into_par_iter()
+        .map(|(path, project)| {
+            let timestamp = get_earliest_timestamp(&path);
+            (path, project, timestamp)
+        })
+        .collect();
+
+    // Now filter based on cached timestamps
+    files_with_timestamps.into_iter()
+        .filter(|(_, _, timestamp)| {
+            if let Some(timestamp) = timestamp {
                 if let Ok(dt) = DateTime::parse_from_rfc3339(&timestamp) {
                     let file_date = dt.naive_local().date();
                     let after_start = start_date.map_or(true, |s| file_date >= s);
@@ -467,6 +481,7 @@ fn filter_files_by_date_range(
             }
             true // Include files we can't parse timestamp from
         })
+        .map(|(path, project, _)| (path, project))
         .collect()
 }
 
@@ -551,8 +566,21 @@ fn get_all_usage_entries_with_filter(
         log::debug!("Filtered to {} files", files_to_process.len());
     }
 
+    // Collect timestamps for all files in parallel to avoid repeated I/O during sorting
+    let mut files_with_timestamps: Vec<_> = files_to_process.into_par_iter()
+        .map(|(path, project)| {
+            let timestamp = get_earliest_timestamp(&path);
+            (path, project, timestamp)
+        })
+        .collect();
+
     // Sort files by their earliest timestamp to ensure chronological processing
-    files_to_process.sort_by_cached_key(|(path, _)| get_earliest_timestamp(path));
+    files_with_timestamps.sort_by(|(_, _, ts1), (_, _, ts2)| ts1.cmp(ts2));
+    
+    // Extract back to the original format
+    let files_to_process: Vec<_> = files_with_timestamps.into_iter()
+        .map(|(path, project, _)| (path, project))
+        .collect();
 
     // Process files in parallel for better performance
     let file_chunks: Vec<_> = files_to_process.chunks(50).collect();
@@ -587,25 +615,42 @@ fn get_all_usage_entries_with_filter(
     // Sort by timestamp
     all_entries.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
 
-    // Update cache if we did a full refresh
-    if start_date.is_none() && end_date.is_none() {
-        let file_timestamps: HashMap<String, String> = files_to_process.into_iter()
-            .filter_map(|(path, _)| {
-                get_earliest_timestamp(&path).map(|ts| (path, ts))
-            })
-            .collect();
-        
-        let mut cache = USAGE_CACHE.lock().unwrap();
-        cache.update(all_entries.clone(), file_timestamps);
-        log::info!("[CACHE] Updated usage cache with {} entries (will be valid for 30 minutes)", all_entries.len());
-        
-        // Save to disk cache
-        log::info!("[CACHE] Saving usage cache to disk...");
-        if let Err(e) = cache.save_to_disk() {
-            log::warn!("[CACHE] Failed to save usage cache to disk: {}", e);
-        } else {
-            log::info!("[CACHE] Usage cache saved successfully");
-        }
+    // Always update cache with all entries (regardless of date filter)
+    // The cache should contain ALL data, filtering happens when reading from cache
+    // Note: We need to recollect timestamps here because files_to_process was consumed
+    // However, we can do this in parallel for efficiency
+    let file_paths: Vec<String> = all_entries.iter()
+        .map(|e| {
+            // Encode the project path if it's a raw path (starts with /)
+            let encoded_project = if e.project_path.starts_with('/') {
+                // Convert raw path to encoded format: /home/will/local_dev -> -home-will-local_dev
+                e.project_path.replace('/', "-")
+            } else {
+                // Already encoded
+                e.project_path.clone()
+            };
+            format!("projects/{}/{}.jsonl", encoded_project, e.session_id)
+        })
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    
+    let file_timestamps: HashMap<String, String> = file_paths.into_par_iter()
+        .filter_map(|path| {
+            get_earliest_timestamp(&path).map(|ts| (path, ts))
+        })
+        .collect();
+    
+    let mut cache = USAGE_CACHE.lock().unwrap();
+    cache.update(all_entries.clone(), file_timestamps);
+    log::info!("[CACHE] Updated usage cache with {} entries (will be valid for 30 minutes)", all_entries.len());
+    
+    // Save to disk cache
+    log::info!("[CACHE] Saving usage cache to disk...");
+    if let Err(e) = cache.save_to_disk() {
+        log::warn!("[CACHE] Failed to save usage cache to disk: {}", e);
+    } else {
+        log::info!("[CACHE] Usage cache saved successfully");
     }
     
     log::info!("[USAGE] Total usage entries found: {}", all_entries.len());

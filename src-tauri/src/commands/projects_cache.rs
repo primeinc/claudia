@@ -216,7 +216,11 @@ pub async fn get_cached_projects(force_refresh: bool) -> Result<Vec<CachedProjec
     log::info!("Loading projects from file system...");
     
     // Get all project directories
-    let project_dirs = list_claude_directory("projects")?;
+    let project_dirs = tokio::task::spawn_blocking(move || {
+        list_claude_directory("projects")
+    })
+    .await
+    .map_err(|e| format!("Failed to execute blocking task: {}", e))??;
     
     if project_dirs.is_empty() {
         let mut cache = PROJECTS_CACHE.lock().unwrap();
@@ -365,7 +369,11 @@ pub async fn get_cached_project_sessions(project_id: String) -> Result<Vec<Strin
     
     // If not in cache or cache is stale, load from file system
     let project_dir_path = format!("projects/{}", project_id);
-    let session_files = list_claude_directory(&project_dir_path)?;
+    let session_files = tokio::task::spawn_blocking(move || {
+        list_claude_directory(&project_dir_path)
+    })
+    .await
+    .map_err(|e| format!("Failed to execute blocking task: {}", e))??;
     
     let sessions: Vec<String> = session_files
         .into_iter()
@@ -421,7 +429,11 @@ pub async fn incremental_cache_update() -> Result<(), String> {
         };
         
         // Check for new or modified files
-        let project_dirs = list_claude_directory("projects")?;
+        let project_dirs = tokio::task::spawn_blocking(move || {
+            list_claude_directory("projects")
+        })
+        .await
+        .map_err(|e| format!("Failed to execute blocking task: {}", e))??;
         let _updated_projects: Vec<Project> = Vec::new();
         let mut needs_full_refresh = false;
         
@@ -438,9 +450,23 @@ pub async fn incremental_cache_update() -> Result<(), String> {
             }
             
             // Check for new sessions in existing projects
-            if let Ok(current_sessions) = find_claude_files(&project_dir_path, "*.jsonl") {
+            let project_dir_path_clone = project_dir_path.clone();
+            let current_sessions_result = tokio::task::spawn_blocking(move || {
+                find_claude_files(&project_dir_path_clone, "*.jsonl")
+            })
+            .await
+            .map_err(|e| format!("Failed to execute blocking task: {}", e))?;
+            
+            if let Ok(current_sessions) = current_sessions_result {
                 for session_path in current_sessions {
-                    if let Ok(mod_time) = get_claude_metadata(&session_path) {
+                    let session_path_clone = session_path.clone();
+                    let mod_time_result = tokio::task::spawn_blocking(move || {
+                        get_claude_metadata(&session_path_clone)
+                    })
+                    .await
+                    .map_err(|e| format!("Failed to execute blocking task: {}", e))?;
+                    
+                    if let Ok(mod_time) = mod_time_result {
                         if let Some(&old_time) = old_metadata.get(&session_path) {
                             if mod_time > old_time {
                                 log::info!("Found modified session: {}", session_path);

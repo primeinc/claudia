@@ -152,65 +152,37 @@ fn try_which_command() -> Option<ClaudeInstallation> {
         
         debug!("Trying 'where claude' to find binary on Windows...");
         
-        // On Windows, use 'where' instead of 'which'
-        let output = Command::new("where")
-            .arg("claude")
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
-            
-        match output {
-            Ok(output) if output.status.success() => {
-                let output_str = String::from_utf8_lossy(&output.stdout)
-                    .replace('\r', "")
-                    .trim()
-                    .to_string();
-                if !output_str.is_empty() {
-                    // 'where' might return multiple paths, take the first one
-                    if let Some(path) = output_str.lines().next() {
-                        debug!("'where' found claude at: {}", path);
-                        
-                        // Get version
-                        let version = get_claude_version(path).ok().flatten();
-                        
-                        return Some(ClaudeInstallation {
-                            path: path.to_string(),
-                            version,
-                            source: "where".to_string(),
-                        });
+        // On Windows, try both 'claude' and 'claude.bat'
+        for cmd_name in &["claude", "claude.bat"] {
+            let output = Command::new("where")
+                .arg(cmd_name)
+                .creation_flags(CREATE_NO_WINDOW)
+                .output();
+                
+            match output {
+                Ok(output) if output.status.success() => {
+                    let output_str = String::from_utf8_lossy(&output.stdout)
+                        .replace('\r', "")
+                        .trim()
+                        .to_string();
+                    if !output_str.is_empty() {
+                        // 'where' might return multiple paths, take the first one
+                        if let Some(path) = output_str.lines().next() {
+                            debug!("'where' found {} at: {}", cmd_name, path);
+                            
+                            // Get version
+                            let version = get_claude_version(path).ok().flatten();
+                            
+                            return Some(ClaudeInstallation {
+                                path: path.to_string(),
+                                version,
+                                source: "where".to_string(),
+                            });
+                        }
                     }
                 }
+                _ => {}
             }
-            _ => {}
-        }
-        
-        // Also try claude.bat specifically
-        let output = Command::new("where")
-            .arg("claude.bat")
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
-            
-        match output {
-            Ok(output) if output.status.success() => {
-                let output_str = String::from_utf8_lossy(&output.stdout)
-                    .replace('\r', "")
-                    .trim()
-                    .to_string();
-                if !output_str.is_empty() {
-                    if let Some(path) = output_str.lines().next() {
-                        debug!("'where' found claude.bat at: {}", path);
-                        
-                        // Get version
-                        let version = get_claude_version(path).ok().flatten();
-                        
-                        return Some(ClaudeInstallation {
-                            path: path.to_string(),
-                            version,
-                            source: "where".to_string(),
-                        });
-                    }
-                }
-            }
-            _ => {}
         }
         
         None
@@ -428,49 +400,36 @@ fn find_standard_installations() -> Vec<ClaudeInstallation> {
 /// Get Claude version by running --version command
 fn get_claude_version(path: &str) -> Result<Option<String>, String> {
     #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        
-        // On Windows, create command with special flags to prevent console corruption
-        let output = Command::new(path)
-            .arg("--version")
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
-            
-        match output {
-            Ok(output) => {
-                if output.status.success() {
-                    // Clean up the output to remove any carriage returns
-                    let stdout = String::from_utf8_lossy(&output.stdout)
-                        .replace('\r', "")
-                        .into_bytes();
-                    Ok(extract_version_from_output(&stdout))
-                } else {
-                    Ok(None)
-                }
-            }
-            Err(e) => {
-                warn!("Failed to get version for {}: {}", path, e);
+    use std::os::windows::process::CommandExt;
+    #[cfg(target_os = "windows")]
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    
+    // Create command with platform-specific flags
+    let mut cmd = Command::new(path);
+    cmd.arg("--version");
+    
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    
+    match cmd.output() {
+        Ok(output) => {
+            if output.status.success() {
+                // Clean up the output to remove any carriage returns on Windows
+                #[cfg(target_os = "windows")]
+                let stdout = String::from_utf8_lossy(&output.stdout)
+                    .replace('\r', "")
+                    .into_bytes();
+                #[cfg(not(target_os = "windows"))]
+                let stdout = output.stdout;
+                
+                Ok(extract_version_from_output(&stdout))
+            } else {
                 Ok(None)
             }
         }
-    }
-    
-    #[cfg(not(target_os = "windows"))]
-    {
-        match Command::new(path).arg("--version").output() {
-            Ok(output) => {
-                if output.status.success() {
-                    Ok(extract_version_from_output(&output.stdout))
-                } else {
-                    Ok(None)
-                }
-            }
-            Err(e) => {
-                warn!("Failed to get version for {}: {}", path, e);
-                Ok(None)
-            }
+        Err(e) => {
+            warn!("Failed to get version for {}: {}", path, e);
+            Ok(None)
         }
     }
 }
