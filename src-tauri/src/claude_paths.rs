@@ -374,3 +374,132 @@ pub fn find_claude_files(relative_path: &str, pattern: &str) -> Result<Vec<Strin
         })
         .collect())
 }
+
+/// Create the cache directory structure (~/.claudia/cache/)
+pub fn ensure_cache_directory() -> Result<(), String> {
+    // First ensure ~/.claudia exists (for cross-platform compatibility)
+    #[cfg(target_os = "windows")]
+    {
+        let userprofile = std::env::var("USERPROFILE")
+            .map_err(|_| "USERPROFILE environment variable not found".to_string())?;
+        
+        let output = std::process::Command::new("cmd")
+            .args(&["/C", "if", "not", "exist", &format!("{}/.claudia", userprofile), "mkdir", &format!("{}/.claudia", userprofile)])
+            .output()
+            .map_err(|e| format!("Failed to create .claudia directory: {}", e))?;
+            
+        if !output.status.success() {
+            return Err("Failed to create .claudia directory".to_string());
+        }
+        
+        // Create cache subdirectory
+        let output = std::process::Command::new("cmd")
+            .args(&["/C", "if", "not", "exist", &format!("{}/.claudia/cache", userprofile), "mkdir", &format!("{}/.claudia/cache", userprofile)])
+            .output()
+            .map_err(|e| format!("Failed to create cache directory: {}", e))?;
+            
+        if !output.status.success() {
+            return Err("Failed to create cache directory".to_string());
+        }
+    }
+    
+    #[cfg(not(target_os = "windows"))]
+    {
+        let home = dirs::home_dir().ok_or_else(|| "Failed to get home directory".to_string())?;
+        let claudia_dir = home.join(".claudia");
+        let cache_dir = claudia_dir.join("cache");
+        
+        std::fs::create_dir_all(&cache_dir)
+            .map_err(|e| format!("Failed to create cache directory: {}", e))?;
+    }
+    
+    Ok(())
+}
+
+/// Read a cache file from ~/.claudia/cache/
+pub fn read_cache_file(cache_name: &str) -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let userprofile = std::env::var("USERPROFILE")
+            .map_err(|_| "USERPROFILE environment variable not found".to_string())?;
+        
+        let cache_path = format!("{}/.claudia/cache/{}", userprofile, cache_name);
+        
+        std::fs::read_to_string(&cache_path)
+            .map_err(|e| format!("Failed to read cache file {}: {}", cache_name, e))
+    }
+    
+    #[cfg(not(target_os = "windows"))]
+    {
+        let home = dirs::home_dir().ok_or_else(|| "Failed to get home directory".to_string())?;
+        let cache_path = home.join(".claudia").join("cache").join(cache_name);
+        
+        std::fs::read_to_string(&cache_path)
+            .map_err(|e| format!("Failed to read cache file {}: {}", cache_name, e))
+    }
+}
+
+/// Write a cache file to ~/.claudia/cache/
+pub fn write_cache_file(cache_name: &str, content: &str) -> Result<(), String> {
+    // Ensure cache directory exists first
+    ensure_cache_directory()?;
+    
+    #[cfg(target_os = "windows")]
+    {
+        let userprofile = std::env::var("USERPROFILE")
+            .map_err(|_| "USERPROFILE environment variable not found".to_string())?;
+        
+        let cache_path = format!("{}/.claudia/cache/{}", userprofile, cache_name);
+        
+        std::fs::write(&cache_path, content)
+            .map_err(|e| format!("Failed to write cache file {}: {}", cache_name, e))
+    }
+    
+    #[cfg(not(target_os = "windows"))]
+    {
+        let home = dirs::home_dir().ok_or_else(|| "Failed to get home directory".to_string())?;
+        let cache_path = home.join(".claudia").join("cache").join(cache_name);
+        
+        std::fs::write(&cache_path, content)
+            .map_err(|e| format!("Failed to write cache file {}: {}", cache_name, e))
+    }
+}
+
+/// Check if a cache file exists and get its modification time
+pub fn get_cache_file_metadata(cache_name: &str) -> Result<u64, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let userprofile = std::env::var("USERPROFILE")
+            .map_err(|_| "USERPROFILE environment variable not found".to_string())?;
+        
+        let cache_path = format!("{}/.claudia/cache/{}", userprofile, cache_name);
+        
+        let metadata = std::fs::metadata(&cache_path)
+            .map_err(|e| format!("Failed to read cache metadata {}: {}", cache_name, e))?;
+        
+        metadata.modified()
+            .map_err(|e| format!("Failed to get modification time: {}", e))?
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| format!("Failed to convert time: {}", e))?
+            .as_secs();
+        
+        Ok(timestamp)
+    }
+    
+    #[cfg(not(target_os = "windows"))]
+    {
+        let home = dirs::home_dir().ok_or_else(|| "Failed to get home directory".to_string())?;
+        let cache_path = home.join(".claudia").join("cache").join(cache_name);
+        
+        let metadata = std::fs::metadata(&cache_path)
+            .map_err(|e| format!("Failed to read cache metadata {}: {}", cache_name, e))?;
+        
+        metadata.modified()
+            .map_err(|e| format!("Failed to get modification time: {}", e))?
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| format!("Failed to convert time: {}", e))?
+            .as_secs();
+        
+        Ok(timestamp)
+    }
+}

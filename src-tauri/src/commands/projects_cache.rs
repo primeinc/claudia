@@ -6,6 +6,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use crate::claude_paths::{
     find_claude_files, get_claude_metadata, list_claude_directory, read_claude_file,
+    read_cache_file, write_cache_file, get_cache_file_metadata,
 };
 use crate::commands::claude::Project;
 
@@ -22,6 +23,28 @@ pub struct CachedProject {
     pub created_at: u64,
     pub last_session_created: u64,
 }
+
+// Cache structures for disk persistence  
+#[derive(Debug, Serialize, Deserialize)]
+struct ProjectsCacheMetadata {
+    version: u32,
+    created_at: u64,
+    last_updated: u64,
+    ttl_seconds: u64,
+    projects_count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ProjectsCacheData {
+    metadata: ProjectsCacheMetadata,
+    projects: Vec<CachedProject>,
+    project_sessions: HashMap<String, Vec<String>>,
+    file_metadata: HashMap<String, u64>,
+}
+
+// Cache constants
+const PROJECTS_CACHE_VERSION: u32 = 1;
+const PROJECTS_CACHE_TTL: u64 = 300; // 5 minutes
 
 #[derive(Debug)]
 struct ProjectsCache {
@@ -67,13 +90,107 @@ impl ProjectsCache {
         self.file_metadata.clear();
         self.last_updated = None;
     }
+
+    // Disk cache methods
+    fn load_from_disk(&mut self) -> Result<bool, String> {
+        match read_cache_file("projects.json") {
+            Ok(content) => {
+                let cache_data: ProjectsCacheData = serde_json::from_str(&content)
+                    .map_err(|e| format!("Failed to parse projects cache: {}", e))?;
+                
+                // Check cache version and TTL
+                if cache_data.metadata.version != PROJECTS_CACHE_VERSION {
+                    log::warn!("Projects cache version mismatch, rebuilding");
+                    return Ok(false);
+                }
+                
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                
+                if now > cache_data.metadata.last_updated + cache_data.metadata.ttl_seconds {
+                    log::info!("Projects cache expired, rebuilding");
+                    return Ok(false);
+                }
+                
+                // Load data into memory cache
+                self.projects = cache_data.projects;
+                self.project_sessions = cache_data.project_sessions;
+                self.file_metadata = cache_data.file_metadata;
+                self.last_updated = Some(Instant::now());
+                
+                log::info!("Loaded {} projects from disk cache", self.projects.len());
+                Ok(true)
+            }
+            Err(e) => {
+                if e.contains("No such file") {
+                    log::info!("No projects cache file found, will create new one");
+                } else {
+                    log::warn!("Failed to read projects cache: {}, will rebuild", e);
+                }
+                Ok(false)
+            }
+        }
+    }
+
+    fn save_to_disk(&self) -> Result<(), String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        
+        let cache_data = ProjectsCacheData {
+            metadata: ProjectsCacheMetadata {
+                version: PROJECTS_CACHE_VERSION,
+                created_at: now,
+                last_updated: now,
+                ttl_seconds: PROJECTS_CACHE_TTL,
+                projects_count: self.projects.len(),
+            },
+            projects: self.projects.clone(),
+            project_sessions: self.project_sessions.clone(),
+            file_metadata: self.file_metadata.clone(),
+        };
+        
+        let json = serde_json::to_string_pretty(&cache_data)
+            .map_err(|e| format!("Failed to serialize projects cache: {}", e))?;
+        
+        write_cache_file("projects.json", &json)
+            .map_err(|e| format!("Failed to write projects cache: {}", e))?;
+        
+        log::info!("Saved {} projects to disk cache", self.projects.len());
+        Ok(())
+    }
+
+    fn is_disk_cache_valid(&self) -> bool {
+        match get_cache_file_metadata("projects.json") {
+            Ok(modified_time) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                
+                now <= modified_time + PROJECTS_CACHE_TTL
+            }
+            Err(_) => false,
+        }
+    }
 }
 
 /// Optimized function to get all projects with caching and parallel processing
 pub async fn get_cached_projects(force_refresh: bool) -> Result<Vec<CachedProject>, String> {
     // Check cache first
     if !force_refresh {
-        let cache = PROJECTS_CACHE.lock().unwrap();
+        let mut cache = PROJECTS_CACHE.lock().unwrap();
+        
+        // Try loading from disk cache if memory cache is stale/empty
+        if cache.is_stale() || cache.projects.is_empty() {
+            if let Err(e) = cache.load_from_disk() {
+                log::warn!("Failed to load projects cache from disk: {}", e);
+            }
+        }
+        
         if !cache.is_stale() && !cache.projects.is_empty() {
             log::info!("Returning cached projects ({} items)", cache.projects.len());
             return Ok(cache.projects.clone());
@@ -119,6 +236,11 @@ pub async fn get_cached_projects(force_refresh: bool) -> Result<Vec<CachedProjec
     {
         let mut cache = PROJECTS_CACHE.lock().unwrap();
         cache.update(projects.clone(), project_sessions, file_metadata);
+        
+        // Save to disk cache
+        if let Err(e) = cache.save_to_disk() {
+            log::warn!("Failed to save projects cache to disk: {}", e);
+        }
     }
 
     log::info!("Loaded {} projects into cache", projects.len());

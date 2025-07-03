@@ -1,5 +1,6 @@
 use crate::claude_paths::{
     claude_file_exists, find_claude_files, list_claude_directory, read_claude_file,
+    read_cache_file, write_cache_file, get_cache_file_metadata,
 };
 use chrono::{DateTime, Local, NaiveDate};
 use serde::{Deserialize, Serialize};
@@ -48,6 +49,90 @@ impl UsageCache {
         self.entries.clear();
         self.file_timestamps.clear();
         self.last_updated = None;
+    }
+
+    // Disk cache methods
+    fn load_from_disk(&mut self) -> Result<bool, String> {
+        match read_cache_file("usage.json") {
+            Ok(content) => {
+                let cache_data: UsageCacheData = serde_json::from_str(&content)
+                    .map_err(|e| format!("Failed to parse usage cache: {}", e))?;
+                
+                // Check cache version and TTL
+                if cache_data.metadata.version != CACHE_VERSION {
+                    log::warn!("Usage cache version mismatch, rebuilding");
+                    return Ok(false);
+                }
+                
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                
+                if now > cache_data.metadata.last_updated + cache_data.metadata.ttl_seconds {
+                    log::info!("Usage cache expired, rebuilding");
+                    return Ok(false);
+                }
+                
+                // Load data into memory cache
+                self.entries = cache_data.entries;
+                self.file_timestamps = cache_data.file_timestamps;
+                self.last_updated = Some(std::time::Instant::now());
+                
+                log::info!("Loaded {} usage entries from disk cache", self.entries.len());
+                Ok(true)
+            }
+            Err(e) => {
+                if e.contains("No such file") {
+                    log::info!("No usage cache file found, will create new one");
+                } else {
+                    log::warn!("Failed to read usage cache: {}, will rebuild", e);
+                }
+                Ok(false)
+            }
+        }
+    }
+
+    fn save_to_disk(&self) -> Result<(), String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        
+        let cache_data = UsageCacheData {
+            metadata: CacheMetadata {
+                version: CACHE_VERSION,
+                created_at: now,
+                last_updated: now,
+                ttl_seconds: USAGE_CACHE_TTL,
+                entries_count: self.entries.len(),
+            },
+            entries: self.entries.clone(),
+            file_timestamps: self.file_timestamps.clone(),
+        };
+        
+        let json = serde_json::to_string_pretty(&cache_data)
+            .map_err(|e| format!("Failed to serialize usage cache: {}", e))?;
+        
+        write_cache_file("usage.json", &json)
+            .map_err(|e| format!("Failed to write usage cache: {}", e))?;
+        
+        log::info!("Saved {} usage entries to disk cache", self.entries.len());
+        Ok(())
+    }
+
+    fn is_disk_cache_valid(&self) -> bool {
+        match get_cache_file_metadata("usage.json") {
+            Ok(modified_time) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                
+                now <= modified_time + USAGE_CACHE_TTL
+            }
+            Err(_) => false,
+        }
     }
 }
 
@@ -114,6 +199,27 @@ pub struct LoadingProgress {
     total: u32,
     message: String,
 }
+
+// Cache structures for disk persistence
+#[derive(Debug, Serialize, Deserialize)]
+struct CacheMetadata {
+    version: u32,
+    created_at: u64,
+    last_updated: u64,
+    ttl_seconds: u64,
+    entries_count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct UsageCacheData {
+    metadata: CacheMetadata,
+    entries: Vec<UsageEntry>,
+    file_timestamps: HashMap<String, String>,
+}
+
+// Cache constants
+const CACHE_VERSION: u32 = 1;
+const USAGE_CACHE_TTL: u64 = 1800; // 30 minutes
 
 // Claude 4 pricing constants (per million tokens)
 const OPUS_4_INPUT_PRICE: f64 = 15.0;
@@ -325,7 +431,15 @@ fn get_all_usage_entries_with_filter(
 ) -> Vec<UsageEntry> {
     // Check cache first
     if !force_refresh {
-        let cache = USAGE_CACHE.lock().unwrap();
+        let mut cache = USAGE_CACHE.lock().unwrap();
+        
+        // Try loading from disk cache if memory cache is stale/empty
+        if cache.is_stale() || cache.entries.is_empty() {
+            if let Err(e) = cache.load_from_disk() {
+                log::warn!("Failed to load usage cache from disk: {}", e);
+            }
+        }
+        
         if !cache.is_stale() && !cache.entries.is_empty() {
             log::info!("Using cached usage data ({} entries, cached {} seconds ago)", 
                 cache.entries.len(), 
@@ -434,6 +548,11 @@ fn get_all_usage_entries_with_filter(
         let mut cache = USAGE_CACHE.lock().unwrap();
         cache.update(all_entries.clone(), file_timestamps);
         log::info!("Updated usage cache with {} entries (will be valid for 5 minutes)", all_entries.len());
+        
+        // Save to disk cache
+        if let Err(e) = cache.save_to_disk() {
+            log::warn!("Failed to save usage cache to disk: {}", e);
+        }
     }
 
     all_entries
