@@ -110,6 +110,7 @@ fn source_preference(installation: &ClaudeInstallation) -> u8 {
         source if source.starts_with("nvm") => 4,
         "local-bin" => 5,
         "claude-local" => 6,
+        "wsl-bridge" => 1,
         "npm-global" => 7,
         "yarn" | "yarn-global" => 8,
         "bun" => 9,
@@ -144,44 +145,90 @@ fn discover_all_installations() -> Vec<ClaudeInstallation> {
 
 /// Try using the 'which' command to find Claude
 fn try_which_command() -> Option<ClaudeInstallation> {
-    debug!("Trying 'which claude' to find binary...");
-
-    match Command::new("which").arg("claude").output() {
-        Ok(output) if output.status.success() => {
-            let output_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-            if output_str.is_empty() {
-                return None;
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        
+        debug!("Trying 'where claude' to find binary on Windows...");
+        
+        // On Windows, try both 'claude' and 'claude.bat'
+        for cmd_name in &["claude", "claude.bat"] {
+            let output = Command::new("where")
+                .arg(cmd_name)
+                .creation_flags(CREATE_NO_WINDOW)
+                .output();
+                
+            match output {
+                Ok(output) if output.status.success() => {
+                    let output_str = String::from_utf8_lossy(&output.stdout)
+                        .replace('\r', "")
+                        .trim()
+                        .to_string();
+                    if !output_str.is_empty() {
+                        // 'where' might return multiple paths, take the first one
+                        if let Some(path) = output_str.lines().next() {
+                            debug!("'where' found {} at: {}", cmd_name, path);
+                            
+                            // Get version
+                            let version = get_claude_version(path).ok().flatten();
+                            
+                            return Some(ClaudeInstallation {
+                                path: path.to_string(),
+                                version,
+                                source: "where".to_string(),
+                            });
+                        }
+                    }
+                }
+                _ => {}
             }
-
-            // Parse aliased output: "claude: aliased to /path/to/claude"
-            let path = if output_str.starts_with("claude:") && output_str.contains("aliased to") {
-                output_str
-                    .split("aliased to")
-                    .nth(1)
-                    .map(|s| s.trim().to_string())
-            } else {
-                Some(output_str)
-            }?;
-
-            debug!("'which' found claude at: {}", path);
-
-            // Verify the path exists
-            if !PathBuf::from(&path).exists() {
-                warn!("Path from 'which' does not exist: {}", path);
-                return None;
-            }
-
-            // Get version
-            let version = get_claude_version(&path).ok().flatten();
-
-            Some(ClaudeInstallation {
-                path,
-                version,
-                source: "which".to_string(),
-            })
         }
-        _ => None,
+        
+        None
+    }
+    
+    #[cfg(not(target_os = "windows"))]
+    {
+        debug!("Trying 'which claude' to find binary...");
+
+        match Command::new("which").arg("claude").output() {
+            Ok(output) if output.status.success() => {
+                let output_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+                if output_str.is_empty() {
+                    return None;
+                }
+
+                // Parse aliased output: "claude: aliased to /path/to/claude"
+                let path = if output_str.starts_with("claude:") && output_str.contains("aliased to") {
+                    output_str
+                        .split("aliased to")
+                        .nth(1)
+                        .map(|s| s.trim().to_string())
+                } else {
+                    Some(output_str)
+                }?;
+
+                debug!("'which' found claude at: {}", path);
+
+                // Verify the path exists
+                if !PathBuf::from(&path).exists() {
+                    warn!("Path from 'which' does not exist: {}", path);
+                    return None;
+                }
+
+                // Get version
+                let version = get_claude_version(&path).ok().flatten();
+
+                Some(ClaudeInstallation {
+                    path,
+                    version,
+                    source: "which".to_string(),
+                })
+            }
+            _ => None,
+        }
     }
 }
 
@@ -240,6 +287,17 @@ fn find_standard_installations() -> Vec<ClaudeInstallation> {
         ("/bin/claude".to_string(), "system".to_string()),
     ];
 
+    // Check Windows-specific paths
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(userprofile) = std::env::var("USERPROFILE") {
+            paths_to_check.push((
+                format!("{}\\.claudia\\bin\\claude.bat", userprofile),
+                "wsl-bridge".to_string(),
+            ));
+        }
+    }
+    
     // Also check user-specific paths
     if let Ok(home) = std::env::var("HOME") {
         paths_to_check.extend(vec![
@@ -288,16 +346,51 @@ fn find_standard_installations() -> Vec<ClaudeInstallation> {
     }
 
     // Also check if claude is available in PATH (without full path)
-    if let Ok(output) = Command::new("claude").arg("--version").output() {
-        if output.status.success() {
-            debug!("claude is available in PATH");
-            let version = extract_version_from_output(&output.stdout);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        
+        // On Windows, try both claude and claude.bat
+        for cmd in &["claude", "claude.bat"] {
+            let output = Command::new(cmd)
+                .arg("--version")
+                .creation_flags(CREATE_NO_WINDOW)
+                .output();
+                
+            if let Ok(output) = output {
+                if output.status.success() {
+                    debug!("{} is available in PATH", cmd);
+                    // Clean up the output to remove any carriage returns
+                    let stdout = String::from_utf8_lossy(&output.stdout)
+                        .replace('\r', "")
+                        .into_bytes();
+                    let version = extract_version_from_output(&stdout);
 
-            installations.push(ClaudeInstallation {
-                path: "claude".to_string(),
-                version,
-                source: "PATH".to_string(),
-            });
+                    installations.push(ClaudeInstallation {
+                        path: cmd.to_string(),
+                        version,
+                        source: "PATH".to_string(),
+                    });
+                    break; // Only need one
+                }
+            }
+        }
+    }
+    
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Ok(output) = Command::new("claude").arg("--version").output() {
+            if output.status.success() {
+                debug!("claude is available in PATH");
+                let version = extract_version_from_output(&output.stdout);
+
+                installations.push(ClaudeInstallation {
+                    path: "claude".to_string(),
+                    version,
+                    source: "PATH".to_string(),
+                });
+            }
         }
     }
 
@@ -306,10 +399,30 @@ fn find_standard_installations() -> Vec<ClaudeInstallation> {
 
 /// Get Claude version by running --version command
 fn get_claude_version(path: &str) -> Result<Option<String>, String> {
-    match Command::new(path).arg("--version").output() {
+    #[cfg(target_os = "windows")]
+    use std::os::windows::process::CommandExt;
+    #[cfg(target_os = "windows")]
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    
+    // Create command with platform-specific flags
+    let mut cmd = Command::new(path);
+    cmd.arg("--version");
+    
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    
+    match cmd.output() {
         Ok(output) => {
             if output.status.success() {
-                Ok(extract_version_from_output(&output.stdout))
+                // Clean up the output to remove any carriage returns on Windows
+                #[cfg(target_os = "windows")]
+                let stdout = String::from_utf8_lossy(&output.stdout)
+                    .replace('\r', "")
+                    .into_bytes();
+                #[cfg(not(target_os = "windows"))]
+                let stdout = output.stdout;
+                
+                Ok(extract_version_from_output(&stdout))
             } else {
                 Ok(None)
             }

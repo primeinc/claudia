@@ -1050,6 +1050,45 @@ export const api = {
   },
 
   /**
+   * Test Claude paths functionality (for debugging)
+   * @returns Promise resolving to test results
+   */
+  async testClaudePaths(): Promise<string> {
+    try {
+      return await invoke<string>("test_claude_paths");
+    } catch (error) {
+      console.error("Failed to test Claude paths:", error);
+      throw error;
+    }
+  },
+
+  /**
+   * Clears the usage cache to force a refresh
+   * @returns Promise resolving to success message
+   */
+  async clearUsageCache(): Promise<string> {
+    try {
+      return await invoke<string>("clear_usage_cache");
+    } catch (error) {
+      console.error("Failed to clear usage cache:", error);
+      throw error;
+    }
+  },
+
+  /**
+   * Gets statistics about the usage cache
+   * @returns Promise resolving to cache statistics
+   */
+  async getUsageCacheStats(): Promise<string> {
+    try {
+      return await invoke<string>("get_usage_cache_stats");
+    } catch (error) {
+      console.error("Failed to get usage cache stats:", error);
+      throw error;
+    }
+  },
+
+  /**
    * Creates a checkpoint for the current session state
    */
   async createCheckpoint(

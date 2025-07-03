@@ -1,3 +1,4 @@
+use crate::claude_paths::{read_claude_file, claude_file_exists};
 use anyhow::Result;
 use chrono;
 use log::{debug, error, info, warn};
@@ -163,27 +164,34 @@ impl AgentRunMetrics {
 
 /// Read JSONL content from a session file
 pub async fn read_session_jsonl(session_id: &str, project_path: &str) -> Result<String, String> {
-    let claude_dir = dirs::home_dir()
-        .ok_or("Failed to get home directory")?
-        .join(".claude")
-        .join("projects");
-
     // Encode project path to match Claude Code's directory naming
     let encoded_project = project_path.replace('/', "-");
-    let project_dir = claude_dir.join(&encoded_project);
-    let session_file = project_dir.join(format!("{}.jsonl", session_id));
+    let relative_path = format!("projects/{}/{}.jsonl", encoded_project, session_id);
 
-    if !session_file.exists() {
+    // Check if file exists using spawn_blocking to avoid blocking the async runtime
+    let relative_path_clone = relative_path.clone();
+    let exists = tokio::task::spawn_blocking(move || {
+        claude_file_exists(&relative_path_clone)
+    })
+    .await
+    .map_err(|e| format!("Failed to check file existence: {}", e))?;
+
+    if !exists {
         return Err(format!(
             "Session file not found: {}",
-            session_file.display()
+            relative_path
         ));
     }
 
-    match tokio::fs::read_to_string(&session_file).await {
-        Ok(content) => Ok(content),
-        Err(e) => Err(format!("Failed to read session file: {}", e)),
-    }
+    // Read file content using spawn_blocking to avoid blocking the async runtime
+    tokio::task::spawn_blocking(move || {
+        match read_claude_file(&relative_path) {
+            Ok(content) => Ok(content),
+            Err(e) => Err(format!("Failed to read session file: {}", e)),
+        }
+    })
+    .await
+    .map_err(|e| format!("Failed to read file: {}", e))?
 }
 
 /// Get agent run with real-time metrics
@@ -1254,30 +1262,35 @@ pub async fn stream_session_output(
 
     // Spawn a task to monitor the file
     tokio::spawn(async move {
-        let claude_dir = match dirs::home_dir() {
-            Some(home) => home.join(".claude").join("projects"),
-            None => return,
-        };
-
         let encoded_project = project_path.replace('/', "-");
-        let project_dir = claude_dir.join(&encoded_project);
-        let session_file = project_dir.join(format!("{}.jsonl", session_id));
+        let relative_path = format!("projects/{}/{}.jsonl", encoded_project, session_id);
 
-        let mut last_size = 0u64;
+        let mut last_content_len = 0usize;
 
         // Monitor file changes continuously while session is running
         loop {
-            if session_file.exists() {
-                if let Ok(metadata) = tokio::fs::metadata(&session_file).await {
-                    let current_size = metadata.len();
+            // Check if file exists using spawn_blocking
+            let relative_path_clone = relative_path.clone();
+            let exists = match tokio::task::spawn_blocking(move || {
+                claude_file_exists(&relative_path_clone)
+            }).await {
+                Ok(result) => result,
+                Err(_) => false,
+            };
 
-                    if current_size > last_size {
-                        // File has grown, read new content
-                        if let Ok(content) = tokio::fs::read_to_string(&session_file).await {
-                            let _ = app
-                                .emit("session-output-update", &format!("{}:{}", run_id, content));
-                        }
-                        last_size = current_size;
+            if exists {
+                // Read the file content using spawn_blocking
+                let relative_path_clone = relative_path.clone();
+                if let Ok(Ok(content)) = tokio::task::spawn_blocking(move || {
+                    read_claude_file(&relative_path_clone)
+                }).await {
+                    let current_len = content.len();
+                    
+                    if current_len > last_content_len {
+                        // File has grown, emit new content
+                        let _ = app
+                            .emit("session-output-update", &format!("{}:{}", run_id, content));
+                        last_content_len = current_len;
                     }
                 }
             } else {
@@ -1288,28 +1301,35 @@ pub async fn stream_session_output(
 
             // Check if the session is still running by querying the database
             // If the session is no longer running, stop streaming
-            if let Ok(conn) = rusqlite::Connection::open(
-                app.path()
-                    .app_data_dir()
-                    .expect("Failed to get app data dir")
-                    .join("agents.db"),
-            ) {
-                if let Ok(status) = conn.query_row(
-                    "SELECT status FROM agent_runs WHERE id = ?1",
-                    rusqlite::params![run_id],
-                    |row| row.get::<_, String>(0),
-                ) {
-                    if status != "running" {
-                        debug!("Session {} is no longer running, stopping stream", run_id);
-                        break;
-                    }
-                } else {
-                    // If we can't query the status, assume it's still running
-                    debug!(
-                        "Could not query session status for {}, continuing stream",
-                        run_id
-                    );
+            let db_path = app.path()
+                .app_data_dir()
+                .expect("Failed to get app data dir")
+                .join("agents.db");
+            
+            let status_check = tokio::task::spawn_blocking(move || {
+                match rusqlite::Connection::open(&db_path) {
+                    Ok(conn) => {
+                        conn.query_row(
+                            "SELECT status FROM agent_runs WHERE id = ?1",
+                            rusqlite::params![run_id],
+                            |row| row.get::<_, String>(0),
+                        ).ok()
+                    },
+                    Err(_) => None,
                 }
+            }).await;
+            
+            if let Ok(Some(status)) = status_check {
+                if status != "running" {
+                    debug!("Session {} is no longer running, stopping stream", run_id);
+                    break;
+                }
+            } else {
+                // If we can't query the status, assume it's still running
+                debug!(
+                    "Could not query session status for {}, continuing stream",
+                    run_id
+                );
             }
 
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;

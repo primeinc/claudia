@@ -3,6 +3,7 @@
 
 mod checkpoint;
 mod claude_binary;
+mod claude_paths;
 mod commands;
 mod process;
 
@@ -26,7 +27,7 @@ use commands::claude::{
     open_new_session, read_claude_md_file, restore_checkpoint, resume_claude_code,
     save_claude_md_file, save_claude_settings, save_system_prompt, search_files,
     track_checkpoint_message, track_session_messages, update_checkpoint_settings,
-    ClaudeProcessState,
+    ClaudeProcessState, refresh_projects_cache, get_projects_cache_stats, clear_projects_cache,
 };
 use commands::mcp::{
     mcp_add, mcp_add_from_claude_desktop, mcp_add_json, mcp_get, mcp_get_server_status, mcp_list,
@@ -35,15 +36,54 @@ use commands::mcp::{
 };
 
 use commands::usage::{
-    get_session_stats, get_usage_by_date_range, get_usage_details, get_usage_stats,
+    get_session_stats, get_usage_by_date_range, get_usage_details, get_usage_stats, test_claude_paths,
+    clear_usage_cache, get_usage_cache_stats,
 };
 use process::ProcessRegistryState;
 use std::sync::Mutex;
 use tauri::Manager;
 
 fn main() {
-    // Initialize logger
-    env_logger::init();
+    // Initialize logger with proper formatting and thread safety for Windows
+    #[cfg(target_os = "windows")]
+    {
+        use std::io::Write;
+        
+        // Use a mutex to ensure thread-safe console output
+        static CONSOLE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        
+        env_logger::Builder::from_default_env()
+            .format(move |buf, record| {
+                let _lock = CONSOLE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+                writeln!(
+                    buf,
+                    "[{}] {} {} {}",
+                    chrono::Local::now().format("%Y-%m-%dT%H:%M:%SZ"),
+                    record.level(),
+                    record.target(),
+                    record.args()
+                )
+            })
+            .write_style(env_logger::WriteStyle::Never)
+            .init();
+    }
+    
+    #[cfg(not(target_os = "windows"))]
+    {
+        env_logger::Builder::from_default_env()
+            .format(|buf, record| {
+                use std::io::Write;
+                writeln!(
+                    buf,
+                    "[{}] {} {} {}",
+                    chrono::Local::now().format("%Y-%m-%dT%H:%M:%SZ"),
+                    record.level(),
+                    record.target(),
+                    record.args()
+                )
+            })
+            .init();
+    }
 
 
     tauri::Builder::default()
@@ -84,6 +124,9 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             list_projects,
+            refresh_projects_cache,
+            get_projects_cache_stats,
+            clear_projects_cache,
             get_project_sessions,
             get_claude_settings,
             open_new_session,
@@ -149,6 +192,9 @@ fn main() {
             get_usage_by_date_range,
             get_usage_details,
             get_session_stats,
+            test_claude_paths,
+            clear_usage_cache,
+            get_usage_cache_stats,
             mcp_add,
             mcp_list,
             mcp_get,

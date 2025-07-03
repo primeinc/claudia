@@ -16,7 +16,7 @@ interface ClaudeVersionSelectorProps {
   /**
    * Callback when a Claude installation is selected
    */
-  onSelect: (installation: ClaudeInstallation) => void;
+  onSelect: (installation: ClaudeInstallation, isUserAction?: boolean) => void;
   /**
    * Optional className for styling
    */
@@ -87,7 +87,7 @@ export const ClaudeVersionSelector: React.FC<ClaudeVersionSelectorProps> = ({
       } else if (foundInstallations.length > 0) {
         // Auto-select the first (best) installation
         setSelectedInstallation(foundInstallations[0]);
-        onSelect(foundInstallations[0]);
+        onSelect(foundInstallations[0], false); // false = not a user action
       }
     } catch (err) {
       console.error("Failed to load Claude installations:", err);
@@ -99,7 +99,7 @@ export const ClaudeVersionSelector: React.FC<ClaudeVersionSelectorProps> = ({
 
   const handleSelect = (installation: ClaudeInstallation) => {
     setSelectedInstallation(installation);
-    onSelect(installation);
+    onSelect(installation, true); // true = user action
   };
 
   const getSourceIcon = (source: string) => {
