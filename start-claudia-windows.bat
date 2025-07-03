@@ -14,14 +14,14 @@ echo Working Directory: %CD%
 echo.
 
 REM --- Check and Setup WSL Bridge if needed ---
-SET "NPM_PATH=%APPDATA%\npm"
-IF NOT EXIST "%NPM_PATH%" (
-    echo [INFO] Creating directory: %NPM_PATH%
-    mkdir "%NPM_PATH%"
+SET "CLAUDIA_BIN_PATH=%USERPROFILE%\.claudia\bin"
+IF NOT EXIST "%CLAUDIA_BIN_PATH%" (
+    echo [INFO] Creating directory: %CLAUDIA_BIN_PATH%
+    mkdir "%CLAUDIA_BIN_PATH%"
 )
 
 REM Check if claude.bat bridge exists
-IF NOT EXIST "%NPM_PATH%\claude.bat" (
+IF NOT EXIST "%CLAUDIA_BIN_PATH%\claude.bat" (
     echo [INFO] WSL bridge not found. Creating claude.bat bridge script...
     
     (
@@ -66,7 +66,7 @@ IF NOT EXIST "%NPM_PATH%\claude.bat" (
         echo ^) else ^(
         echo     wsl -- bash -lc "claude %%args%%"
         echo ^)
-    ) > "%NPM_PATH%\claude.bat"
+    ) > "%CLAUDIA_BIN_PATH%\claude.bat"
     
     echo [OK] WSL bridge created successfully.
     echo.
@@ -89,8 +89,8 @@ if %ERRORLEVEL% == 0 (
 REM Ensure .claude directory exists in WSL
 wsl mkdir -p ~/.claude 2>nul
 
-REM Add bun and npm to PATH
-SET "PATH=%USERPROFILE%\.bun\bin;%APPDATA%\npm;%PATH%"
+REM Add bun and claudia bin to PATH
+SET "PATH=%USERPROFILE%\.bun\bin;%CLAUDIA_BIN_PATH%;%PATH%"
 
 REM Disable Rust incremental compilation for Windows
 SET CARGO_INCREMENTAL=0
