@@ -6,7 +6,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use crate::claude_paths::{
     find_claude_files, get_claude_metadata, list_claude_directory, read_claude_file,
-    read_cache_file, write_cache_file,
+    read_cache_file, write_cache_file, get_cache_file_metadata,
 };
 use crate::commands::claude::Project;
 
@@ -93,6 +93,11 @@ impl ProjectsCache {
 
     // Disk cache methods
     fn load_from_disk(&mut self) -> Result<bool, String> {
+        // First check if cache file exists and is valid
+        if !Self::is_disk_cache_valid() {
+            return Ok(false);
+        }
+        
         match read_cache_file("projects.json") {
             Ok(content) => {
                 let cache_data: ProjectsCacheData = serde_json::from_str(&content)
@@ -163,6 +168,24 @@ impl ProjectsCache {
         Ok(())
     }
 
+    fn is_disk_cache_valid() -> bool {
+        match get_cache_file_metadata("projects.json") {
+            Ok(modified_time) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                
+                let is_valid = now <= modified_time + PROJECTS_CACHE_TTL;
+                log::info!("Projects disk cache valid: {} (age: {}s)", is_valid, now - modified_time);
+                is_valid
+            }
+            Err(e) => {
+                log::info!("Projects disk cache not found: {}", e);
+                false
+            }
+        }
+    }
 }
 
 /// Optimized function to get all projects with caching and parallel processing
@@ -173,8 +196,14 @@ pub async fn get_cached_projects(force_refresh: bool) -> Result<Vec<CachedProjec
         
         // Try loading from disk cache if memory cache is stale/empty
         if cache.is_stale() || cache.projects.is_empty() {
-            if let Err(e) = cache.load_from_disk() {
-                log::warn!("Failed to load projects cache from disk: {}", e);
+            println!("[CACHE] Attempting to load projects cache from disk...");
+            match cache.load_from_disk() {
+                Ok(true) => println!("[CACHE] Successfully loaded projects cache from disk"),
+                Ok(false) => println!("[CACHE] Disk cache not loaded (invalid or missing)"),
+                Err(e) => {
+                    println!("[CACHE] Failed to load projects cache from disk: {}", e);
+                    log::warn!("Failed to load projects cache from disk: {}", e);
+                }
             }
         }
         
@@ -225,8 +254,12 @@ pub async fn get_cached_projects(force_refresh: bool) -> Result<Vec<CachedProjec
         cache.update(projects.clone(), project_sessions, file_metadata);
         
         // Save to disk cache
+        println!("[CACHE] Saving projects cache to disk...");
         if let Err(e) = cache.save_to_disk() {
+            println!("[CACHE] Failed to save projects cache to disk: {}", e);
             log::warn!("Failed to save projects cache to disk: {}", e);
+        } else {
+            println!("[CACHE] Projects cache saved successfully");
         }
     }
 

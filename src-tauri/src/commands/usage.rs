@@ -1,6 +1,6 @@
 use crate::claude_paths::{
     claude_file_exists, find_claude_files, list_claude_directory, read_claude_file,
-    read_cache_file, write_cache_file,
+    read_cache_file, write_cache_file, get_cache_file_metadata,
 };
 use chrono::{DateTime, Local, NaiveDate};
 use serde::{Deserialize, Serialize};
@@ -53,6 +53,11 @@ impl UsageCache {
 
     // Disk cache methods
     fn load_from_disk(&mut self) -> Result<bool, String> {
+        // First check if cache file exists and is valid
+        if !Self::is_disk_cache_valid() {
+            return Ok(false);
+        }
+        
         match read_cache_file("usage.json") {
             Ok(content) => {
                 let cache_data: UsageCacheData = serde_json::from_str(&content)
@@ -121,6 +126,24 @@ impl UsageCache {
         Ok(())
     }
 
+    fn is_disk_cache_valid() -> bool {
+        match get_cache_file_metadata("usage.json") {
+            Ok(modified_time) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                
+                let is_valid = now <= modified_time + USAGE_CACHE_TTL;
+                log::info!("Usage disk cache valid: {} (age: {}s)", is_valid, now - modified_time);
+                is_valid
+            }
+            Err(e) => {
+                log::info!("Usage disk cache not found: {}", e);
+                false
+            }
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -422,8 +445,14 @@ fn get_all_usage_entries_with_filter(
         
         // Try loading from disk cache if memory cache is stale/empty
         if cache.is_stale() || cache.entries.is_empty() {
-            if let Err(e) = cache.load_from_disk() {
-                log::warn!("Failed to load usage cache from disk: {}", e);
+            println!("[CACHE] Attempting to load usage cache from disk...");
+            match cache.load_from_disk() {
+                Ok(true) => println!("[CACHE] Successfully loaded usage cache from disk"),
+                Ok(false) => println!("[CACHE] Disk cache not loaded (invalid or missing)"),
+                Err(e) => {
+                    println!("[CACHE] Failed to load usage cache from disk: {}", e);
+                    log::warn!("Failed to load usage cache from disk: {}", e);
+                }
             }
         }
         
@@ -537,8 +566,12 @@ fn get_all_usage_entries_with_filter(
         log::info!("Updated usage cache with {} entries (will be valid for 5 minutes)", all_entries.len());
         
         // Save to disk cache
+        println!("[CACHE] Saving usage cache to disk...");
         if let Err(e) = cache.save_to_disk() {
+            println!("[CACHE] Failed to save usage cache to disk: {}", e);
             log::warn!("Failed to save usage cache to disk: {}", e);
+        } else {
+            println!("[CACHE] Usage cache saved successfully");
         }
     }
 
